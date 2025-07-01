@@ -1,0 +1,26 @@
+name: image-cloaking
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch>=2.0.0
+  - torchvision>=0.15.0
+  - tensorflow=2.10.0
+  - pillow>=9.0.0
+  - opencv>=4.8.0
+  - numpy<2.0
+  - matplotlib>=3.7.0
+  - scikit-image>=0.20.0
+  - requests>=2.31.0
+  - click>=8.1.0
+  - tqdm>=4.65.0
+  - git
+  - pip
+  - pip:
+    - foolbox>=3.3.3
+    - adversarial-robustness-toolbox>=1.15.0
+    - mtcnn>=0.1.1
+    - dlib>=19.24.0
+    - face-recognition>=1.3.0 

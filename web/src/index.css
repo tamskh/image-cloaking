@@ -1,0 +1,299 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Production optimizations */
+@layer base {
+  * {
+    /* Prevent flash of unstyled content */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html {
+    /* Improve scroll performance */
+    scroll-behavior: smooth;
+    /* Prevent layout shifts */
+    overflow-x: hidden;
+  }
+
+  body {
+    /* Optimize font rendering */
+    text-rendering: optimizeLegibility;
+    /* Reduce repaints */
+    transform: translateZ(0);
+  }
+
+  /* Optimize images */
+  img {
+    /* Prevent layout shifts */
+    height: auto;
+    /* Improve loading performance */
+    loading: lazy;
+  }
+}
+
+/* Component layer optimizations */
+@layer components {
+  /* Optimized button styles */
+  .btn-primary {
+    @apply bg-primary-600 hover:bg-primary-700 text-white font-medium py-2 px-4 rounded-md transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    /* GPU acceleration for better performance */
+    transform: translateZ(0);
+    will-change: background-color;
+  }
+
+  .btn-secondary {
+    @apply bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-md transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    transform: translateZ(0);
+    will-change: background-color;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-md transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+    transform: translateZ(0);
+    will-change: background-color;
+  }
+
+  /* Optimized card styles */
+  .card {
+    @apply bg-white rounded-lg shadow-sm border border-gray-200 p-6;
+    /* Optimize for frequent updates */
+    contain: layout style paint;
+  }
+
+  /* Optimized scroll containers */
+  .scroll-container {
+    /* Improve scroll performance */
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+}
+
+/* Utility layer optimizations */
+@layer utilities {
+  /* Animation optimizations */
+  .animate-bounce-subtle {
+    animation: bounce-subtle 2s infinite;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.5s ease-out;
+  }
+
+  .animate-slide-up {
+    animation: slide-up 0.6s ease-out;
+  }
+
+  /* Optimized scroll behavior */
+  .scroll-mt-header {
+    scroll-margin-top: 4rem;
+  }
+
+  /* Performance optimizations */
+  .gpu-accelerated {
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    perspective: 1000px;
+  }
+
+  /* Reduce layout shifts */
+  .aspect-ratio-16-9 {
+    aspect-ratio: 16 / 9;
+  }
+
+  .aspect-ratio-4-3 {
+    aspect-ratio: 4 / 3;
+  }
+
+  .aspect-ratio-1-1 {
+    aspect-ratio: 1 / 1;
+  }
+}
+
+/* Optimized animations */
+@keyframes bounce-subtle {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Color scheme definitions */
+:root {
+  --primary-50: #eff6ff;
+  --primary-100: #dbeafe;
+  --primary-200: #bfdbfe;
+  --primary-300: #93c5fd;
+  --primary-400: #60a5fa;
+  --primary-500: #3b82f6;
+  --primary-600: #2563eb;
+  --primary-700: #1d4ed8;
+  --primary-800: #1e40af;
+  --primary-900: #1e3a8a;
+
+  --security-50: #f0f9ff;
+  --security-100: #e0f2fe;
+  --security-200: #bae6fd;
+  --security-300: #7dd3fc;
+  --security-400: #38bdf8;
+  --security-500: #0ea5e9;
+  --security-600: #0284c7;
+  --security-700: #0369a1;
+  --security-800: #075985;
+  --security-900: #0c4a6e;
+}
+
+/* Responsive design optimizations */
+@media (max-width: 640px) {
+  .card {
+    @apply p-4;
+  }
+  
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger {
+    @apply py-3 px-6 text-sm;
+  }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .card {
+    @apply border-2 border-gray-400;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* Dark mode support (if needed in future) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  
+  body {
+    @apply text-gray-900;
+  }
+}
+
+@layer components {
+  .dropzone {
+    @apply border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-primary-400 transition-colors duration-200 cursor-pointer;
+  }
+  
+  .dropzone.active {
+    @apply border-primary-500 bg-primary-50;
+  }
+
+  /* Loading dots animation */
+  .loading-dots {
+    display: inline-flex;
+    gap: 2px;
+  }
+  
+  .loading-dots div {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background-color: currentColor;
+    animation: loading-dots 1.4s ease-in-out infinite both;
+  }
+  
+  .loading-dots div:nth-child(1) { animation-delay: -0.32s; }
+  .loading-dots div:nth-child(2) { animation-delay: -0.16s; }
+  .loading-dots div:nth-child(3) { animation-delay: 0s; }
+  .loading-dots div:nth-child(4) { animation-delay: 0.16s; }
+
+  /* Mobile menu styles */
+  .mobile-menu {
+    @apply fixed inset-0 z-50 bg-white transform transition-transform duration-300 ease-in-out;
+  }
+  
+  .mobile-menu.closed {
+    @apply translate-x-full;
+  }
+  
+  .mobile-menu.open {
+    @apply translate-x-0;
+  }
+
+  /* Smooth slider styles */
+  .slider::-webkit-slider-thumb {
+    @apply appearance-none w-5 h-5 bg-primary-500 rounded-full cursor-pointer border-2 border-white shadow-md;
+  }
+  
+  .slider::-moz-range-thumb {
+    @apply w-5 h-5 bg-primary-500 rounded-full cursor-pointer border-2 border-white shadow-md;
+  }
+}
+
+@keyframes loading-dots {
+  0%, 80%, 100% {
+    transform: scale(0.8);
+    opacity: 0.5;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+} 
