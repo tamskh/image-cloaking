@@ -1,143 +1,269 @@
 /**
- * Processing throttle utility to prevent browser freezing
- * Dynamically adjusts processing based on device performance
+ * Advanced Processing throttle utility to prevent browser freezing
+ * Uses frame timing, memory pressure, and cooperative scheduling
  */
 
 export class ProcessingThrottle {
   constructor() {
-    this.lastFrameTime = performance.now()
+    this.frameTime = 16.67 // Target 60fps (16.67ms per frame)
+    this.frameBudget = 8 // Use max 8ms per frame for processing
+    this.lastFrameStart = 0
     this.frameCount = 0
-    this.averageFPS = 60
-    this.performanceHistory = []
+    this.realFPS = 60
+    this.memoryPressure = 0
+    this.performanceGrade = 'good'
     this.isThrottling = false
+    this.processingTime = 0
+    this.yieldCount = 0
+    
+    // Frame timing tracking
+    this.frameTimings = []
+    this.maxFrameTimings = 30
+    
+    // Memory monitoring
+    this.memoryBaseline = this.getMemoryUsage()
+    this.memoryThreshold = this.memoryBaseline * 1.5 // 50% increase threshold
+    
+    // Start frame monitoring
+    this.startFrameMonitoring()
   }
 
-  // Check if we should yield control to the main thread
-  shouldYield(forceCheck = false) {
-    const now = performance.now()
-    const deltaTime = now - this.lastFrameTime
+  // Start monitoring actual frame timing using requestAnimationFrame
+  startFrameMonitoring() {
+    let lastTime = performance.now()
     
-    // Calculate current FPS
-    if (deltaTime > 0) {
-      const currentFPS = 1000 / deltaTime
+    const frameCallback = (currentTime) => {
+      const frameDelta = currentTime - lastTime
+      this.frameTimings.push(frameDelta)
+      
+      // Keep only recent frame timings
+      if (this.frameTimings.length > this.maxFrameTimings) {
+        this.frameTimings.shift()
+      }
+      
+      // Calculate real FPS from actual frame timing
+      if (this.frameTimings.length > 5) {
+        const avgFrameTime = this.frameTimings.reduce((a, b) => a + b, 0) / this.frameTimings.length
+        this.realFPS = Math.min(60, 1000 / avgFrameTime)
+        this.frameTime = avgFrameTime
+        
+        // Adjust frame budget based on actual performance
+        this.frameBudget = Math.max(4, Math.min(12, avgFrameTime * 0.5))
+      }
+      
+      lastTime = currentTime
       this.frameCount++
       
-      // Update average FPS (exponential moving average)
-      this.averageFPS = this.averageFPS * 0.9 + currentFPS * 0.1
+      // Update performance grade
+      this.updatePerformanceGrade()
       
-      // Track performance over time
-      this.performanceHistory.push({
-        timestamp: now,
-        fps: currentFPS,
-        memory: this.getMemoryUsage()
-      })
-      
-      // Keep only last 50 measurements
-      if (this.performanceHistory.length > 50) {
-        this.performanceHistory.shift()
-      }
+      // Continue monitoring
+      requestAnimationFrame(frameCallback)
     }
     
-    this.lastFrameTime = now
-    
-    // Yield if FPS is too low or if forced
-    const shouldYield = forceCheck || this.averageFPS < 30 || deltaTime > 33 // 30 FPS threshold
-    
-    if (shouldYield) {
-      this.isThrottling = true
-    }
-    
-    return shouldYield
+    requestAnimationFrame(frameCallback)
   }
 
-  // Yield control with appropriate delay based on performance
-  async yield() {
+  // Update performance grade based on real metrics
+  updatePerformanceGrade() {
+    const memoryUsage = this.getMemoryUsage()
+    this.memoryPressure = Math.max(0, (memoryUsage - this.memoryBaseline) / this.memoryBaseline)
+    
+    if (this.realFPS > 50 && this.memoryPressure < 0.3) {
+      this.performanceGrade = 'excellent'
+    } else if (this.realFPS > 40 && this.memoryPressure < 0.5) {
+      this.performanceGrade = 'good'
+    } else if (this.realFPS > 25 && this.memoryPressure < 0.8) {
+      this.performanceGrade = 'fair'
+    } else {
+      this.performanceGrade = 'poor'
+    }
+  }
+
+  // Check if we should yield based on frame budget and processing time
+  shouldYield(processingStartTime = null) {
+    const now = performance.now()
+    
+    if (processingStartTime) {
+      this.processingTime = now - processingStartTime
+    }
+    
+    // Always yield if we've exceeded frame budget
+    if (this.processingTime >= this.frameBudget) {
+      this.isThrottling = true
+      return true
+    }
+    
+    // Yield if performance is poor
+    if (this.performanceGrade === 'poor') {
+      this.isThrottling = true
+      return true
+    }
+    
+    // Yield if memory pressure is high
+    if (this.memoryPressure > 0.7) {
+      this.isThrottling = true
+      return true
+    }
+    
+    // Yield if frame rate is dropping
+    if (this.realFPS < 30) {
+      this.isThrottling = true
+      return true
+    }
+    
+    return false
+  }
+
+  // Advanced yielding with multiple strategies
+  async yield(priority = 'normal') {
+    this.yieldCount++
+    this.processingTime = 0 // Reset processing time after yield
+    
     return new Promise(resolve => {
-      const delay = this.calculateYieldDelay()
+      const yieldTime = this.calculateYieldTime(priority)
       
-      if (typeof requestIdleCallback !== 'undefined') {
-        requestIdleCallback(resolve, { timeout: delay })
-      } else {
-        setTimeout(resolve, delay)
+      // Strategy 1: Use scheduler.postTask if available (Chrome 94+)
+      if (typeof scheduler !== 'undefined' && scheduler.postTask) {
+        const taskPriority = priority === 'high' ? 'user-blocking' : 
+                            priority === 'low' ? 'background' : 'user-visible'
+        
+        scheduler.postTask(() => resolve(), { priority: taskPriority })
+        return
       }
       
-      this.isThrottling = false
+      // Strategy 2: Use requestIdleCallback with proper timeout
+      if (typeof requestIdleCallback !== 'undefined') {
+        requestIdleCallback(() => resolve(), { 
+          timeout: yieldTime 
+        })
+        return
+      }
+      
+      // Strategy 3: Use MessageChannel for immediate yielding
+      if (yieldTime === 0) {
+        const channel = new MessageChannel()
+        channel.port2.onmessage = () => resolve()
+        channel.port1.postMessage(null)
+        return
+      }
+      
+      // Strategy 4: Fallback to setTimeout
+      setTimeout(resolve, yieldTime)
     })
   }
 
-  // Calculate appropriate yield delay based on current performance
-  calculateYieldDelay() {
-    if (this.averageFPS > 45) {
-      return 0 // No delay needed
-    } else if (this.averageFPS > 30) {
-      return 1 // Minimal delay
-    } else if (this.averageFPS > 20) {
-      return 5 // Short delay
-    } else {
-      return 10 // Longer delay for very poor performance
+  // Calculate yield time based on current performance and priority
+  calculateYieldTime(priority = 'normal') {
+    const baseTime = this.getBaseYieldTime()
+    
+    // Adjust based on priority
+    const priorityMultiplier = {
+      'high': 0.5,
+      'normal': 1.0,
+      'low': 1.5
+    }[priority] || 1.0
+    
+    // Adjust based on memory pressure
+    const memoryMultiplier = 1 + Math.min(this.memoryPressure, 1.0)
+    
+    return Math.floor(baseTime * priorityMultiplier * memoryMultiplier)
+  }
+
+  // Get base yield time based on performance grade
+  getBaseYieldTime() {
+    switch (this.performanceGrade) {
+      case 'excellent': return 0  // Immediate yield
+      case 'good': return 1
+      case 'fair': return 5
+      case 'poor': return 16      // Full frame yield
+      default: return 5
     }
   }
 
-  // Get memory usage if available
+  // Get memory usage with better fallbacks
   getMemoryUsage() {
     if (typeof performance !== 'undefined' && performance.memory) {
       return performance.memory.usedJSHeapSize
     }
-    return 0
+    
+    // Estimate based on other factors
+    if (typeof navigator !== 'undefined' && navigator.deviceMemory) {
+      return navigator.deviceMemory * 1024 * 1024 * 0.1 // Rough estimate
+    }
+    
+    return 100 * 1024 * 1024 // Default 100MB estimate
   }
 
-  // Get performance statistics
+  // Get comprehensive performance statistics
   getStats() {
     return {
-      averageFPS: this.averageFPS,
+      realFPS: Math.round(this.realFPS * 10) / 10,
+      frameTime: Math.round(this.frameTime * 10) / 10,
+      frameBudget: this.frameBudget,
+      processingTime: this.processingTime,
+      memoryPressure: Math.round(this.memoryPressure * 100) / 100,
+      memoryUsage: Math.round(this.getMemoryUsage() / 1024 / 1024),
+      performanceGrade: this.performanceGrade,
       isThrottling: this.isThrottling,
       frameCount: this.frameCount,
-      memoryUsage: this.getMemoryUsage(),
-      performanceGrade: this.getPerformanceGrade()
+      yieldCount: this.yieldCount
     }
   }
 
-  // Classify current performance
-  getPerformanceGrade() {
-    if (this.averageFPS > 45) return 'excellent'
-    if (this.averageFPS > 30) return 'good'
-    if (this.averageFPS > 20) return 'fair'
-    return 'poor'
-  }
-
-  // Reset statistics
+  // Reset all statistics
   reset() {
     this.frameCount = 0
-    this.performanceHistory = []
-    this.averageFPS = 60
+    this.yieldCount = 0
+    this.processingTime = 0
     this.isThrottling = false
-    this.lastFrameTime = performance.now()
+    this.frameTimings = []
+    this.memoryBaseline = this.getMemoryUsage()
   }
 }
 
 // Global throttle instance
 export const globalThrottle = new ProcessingThrottle()
 
-// Utility function for chunked processing with automatic yielding
+// Advanced chunked processing with time-based scheduling
 export async function processInChunks(
   array, 
-  chunkSize, 
-  processingFunction, 
-  progressCallback = null,
-  throttle = globalThrottle
+  chunkProcessor, 
+  options = {}
 ) {
+  const {
+    initialChunkSize = 10,
+    maxChunkSize = 100,
+    minChunkSize = 1,
+    progressCallback = null,
+    throttle = globalThrottle,
+    priority = 'normal'
+  } = options
+
   const results = []
   const totalItems = array.length
   let processedItems = 0
+  let adaptiveChunkSize = initialChunkSize
   
-  for (let i = 0; i < array.length; i += chunkSize) {
-    const chunk = array.slice(i, i + chunkSize)
+  for (let i = 0; i < array.length; i += adaptiveChunkSize) {
+    const processingStart = performance.now()
+    const chunk = array.slice(i, i + adaptiveChunkSize)
     
     // Process the chunk
-    const chunkResults = await processingFunction(chunk, i)
+    const chunkResults = await chunkProcessor(chunk, i)
     results.push(...chunkResults)
     
     processedItems += chunk.length
+    const processingTime = performance.now() - processingStart
+    
+    // Adaptive chunk sizing based on processing time
+    if (processingTime < throttle.frameBudget * 0.5) {
+      // Processing was fast, increase chunk size
+      adaptiveChunkSize = Math.min(maxChunkSize, Math.ceil(adaptiveChunkSize * 1.2))
+    } else if (processingTime > throttle.frameBudget * 0.8) {
+      // Processing was slow, decrease chunk size
+      adaptiveChunkSize = Math.max(minChunkSize, Math.ceil(adaptiveChunkSize * 0.8))
+    }
     
     // Update progress
     if (progressCallback) {
@@ -146,108 +272,72 @@ export async function processInChunks(
     }
     
     // Check if we should yield
-    if (throttle.shouldYield()) {
-      await throttle.yield()
+    if (throttle.shouldYield(processingStart)) {
+      await throttle.yield(priority)
     }
   }
   
   return results
 }
 
-// Utility for processing large image data arrays with yielding
-export async function processImageDataInChunks(
-  imageData,
-  processingFunction,
-  chunkSize = 1000,
-  progressCallback = null
+// Specialized processing for tensor operations with memory management
+export async function processTensorInBatches(
+  tensorData,
+  batchProcessor,
+  options = {}
 ) {
-  const { data, width, height } = imageData
-  const totalPixels = width * height
-  const newData = new Uint8ClampedArray(data)
+  const {
+    batchSize = 1000,
+    progressCallback = null,
+    memoryCleanup = null,
+    throttle = globalThrottle
+  } = options
+
+  const results = []
+  const totalBatches = Math.ceil(tensorData.length / batchSize)
   
-  let processedPixels = 0
-  const throttle = new ProcessingThrottle()
-  
-  for (let pixelIndex = 0; pixelIndex < totalPixels; pixelIndex += chunkSize) {
-    const endIndex = Math.min(pixelIndex + chunkSize, totalPixels)
+  for (let i = 0; i < totalBatches; i++) {
+    const processingStart = performance.now()
+    const startIdx = i * batchSize
+    const endIdx = Math.min(startIdx + batchSize, tensorData.length)
+    const batch = tensorData.slice(startIdx, endIdx)
     
-    // Process chunk of pixels
-    for (let i = pixelIndex; i < endIndex; i++) {
-      const dataIndex = i * 4
-      const x = i % width
-      const y = Math.floor(i / width)
-      
-      // Apply processing function to this pixel
-      processingFunction(newData, dataIndex, x, y, width, height)
+    // Process batch
+    const batchResult = await batchProcessor(batch, i)
+    results.push(batchResult)
+    
+    // Memory cleanup if provided
+    if (memoryCleanup) {
+      memoryCleanup()
     }
     
-    processedPixels = endIndex
-    
-    // Update progress
+    // Progress update
     if (progressCallback) {
-      const progress = (processedPixels / totalPixels) * 100
+      const progress = ((i + 1) / totalBatches) * 100
       progressCallback(progress)
     }
     
-    // Yield control if needed
-    if (throttle.shouldYield()) {
-      await throttle.yield()
+    // Always yield after tensor operations to prevent blocking
+    if (throttle.shouldYield(processingStart) || throttle.memoryPressure > 0.5) {
+      await throttle.yield('normal')
     }
   }
   
-  return new ImageData(newData, width, height)
+  return results
 }
 
-// Smart delay function that adapts to system performance
-export async function smartDelay(baseDelay = 1) {
-  const stats = globalThrottle.getStats()
-  
-  let adaptiveDelay = baseDelay
-  
-  // Increase delay if performance is poor
-  switch (stats.performanceGrade) {
-    case 'poor':
-      adaptiveDelay = baseDelay * 4
-      break
-    case 'fair':
-      adaptiveDelay = baseDelay * 2
-      break
-    case 'good':
-      adaptiveDelay = baseDelay * 1.2
-      break
-    case 'excellent':
-      adaptiveDelay = baseDelay * 0.5
-      break
-  }
-  
-  return new Promise(resolve => setTimeout(resolve, adaptiveDelay))
-}
-
-// Performance monitoring for React components
+// React hook for using processing throttle
 export function useProcessingThrottle() {
-  const [throttleStats, setThrottleStats] = useState(globalThrottle.getStats())
-  
-  const updateStats = useCallback(() => {
-    setThrottleStats(globalThrottle.getStats())
-  }, [])
-  
-  const startMonitoring = useCallback(() => {
-    const interval = setInterval(updateStats, 1000) // Update every second
-    return () => clearInterval(interval)
-  }, [updateStats])
-  
-  const resetThrottle = useCallback(() => {
-    globalThrottle.reset()
-    updateStats()
-  }, [updateStats])
+  const throttle = globalThrottle
   
   return {
-    throttleStats,
-    startMonitoring,
-    resetThrottle,
-    updateStats
+    throttle,
+    stats: throttle.getStats(),
+    shouldYield: throttle.shouldYield.bind(throttle),
+    yield: throttle.yield.bind(throttle),
+    processInChunks: (array, processor, options) => 
+      processInChunks(array, processor, { ...options, throttle }),
+    processTensorInBatches: (tensorData, processor, options) =>
+      processTensorInBatches(tensorData, processor, { ...options, throttle })
   }
-}
-
-// React hook import at top level (this is required for the hooks above)
-import { useState, useCallback } from 'react' 
+} 

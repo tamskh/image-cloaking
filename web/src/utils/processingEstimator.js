@@ -9,32 +9,32 @@ const logger = createLogger('ProcessingEstimator')
 
 // Base processing rates (pixels per second) for different operations
 const PROCESSING_RATES = {
-  // Face detection rates (pixels/sec)
+  // Face detection rates (pixels/sec) - optimized for web
   faceDetection: {
-    fast: 50000,    // Modern devices
-    medium: 30000,  // Average devices  
-    slow: 15000     // Older devices
+    fast: 800000,    // Modern devices
+    medium: 500000,  // Average devices  
+    slow: 300000     // Older devices
   },
   
-  // Adversarial perturbation rates (pixels/sec)
+  // Adversarial perturbation rates (pixels/sec) - realistic for browser
   fawkesBase: {
-    low: 25000,
-    mid: 20000, 
-    high: 15000
+    low: 600000,
+    mid: 400000, 
+    high: 250000
   },
   
   advCloakIteration: {
-    fast: 8000,
-    medium: 5000,
-    slow: 3000
+    fast: 200000,
+    medium: 120000,
+    slow: 80000
   },
   
   // Overhead times (seconds)
   overhead: {
-    initialization: 2,
-    faceProcessing: 1.5,
-    finalization: 1,
-    workerSetup: 0.5
+    initialization: 1,
+    faceProcessing: 0.5,
+    finalization: 0.5,
+    workerSetup: 0.2
   }
 }
 
@@ -153,8 +153,10 @@ export class ProcessingTimeEstimator {
       
       // Add safety margin (20-40% depending on complexity)
       const safetyMargin = 1.2 + (complexityFactor - 1) * 0.2
+      const finalTime = Math.ceil(calibratedTime * safetyMargin)
       
-      return Math.ceil(calibratedTime * safetyMargin)
+      // Cap at reasonable maximum (5 minutes)
+      return Math.min(finalTime, 300)
       
     } catch (error) {
       logger.warn('Time estimation failed, using fallback:', error)
@@ -204,12 +206,12 @@ export class ProcessingTimeEstimator {
   }
   
   getFallbackEstimate(settings) {
-    // Conservative fallback estimates
+    // Realistic fallback estimates for web processing
     switch (settings.method) {
-      case 'fawkes': return 45
-      case 'advcloak': return Math.min(90, 20 + (settings.advCloakIterations || 15) * 3)
-      case 'both': return 120
-      default: return 60
+      case 'fawkes': return 60      // 1 minute
+      case 'advcloak': return 90    // 1.5 minutes  
+      case 'both': return 180       // 3 minutes
+      default: return 90
     }
   }
   

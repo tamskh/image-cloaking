@@ -1,446 +1,805 @@
 /**
- * Fast adversarial image cloaking optimized for web browsers
- * Balances effectiveness with performance for real-time processing
+ * TensorFlow.js-based adversarial image cloaking for privacy protection
+ * Uses MediaPipe face detection and TensorFlow.js for gradient-based adversarial attacks
  */
 
-import { getImageDataFromDataURL, imageDataToDataURL } from './imageUtils'
-import { globalThrottle } from './processingThrottle'
+import * as tf from '@tensorflow/tfjs'
+import '@tensorflow/tfjs-backend-webgl'
+import '@tensorflow/tfjs-backend-cpu'
+import { FaceDetector, FilesetResolver } from '@mediapipe/tasks-vision'
 import { createLogger } from './logger'
+import { globalThrottle } from './processingThrottle'
 
 const logger = createLogger('CloakingEngine')
 
-// Simplified but effective face detector
-class FastFaceDetector {
-  constructor() {
-    this.features = this.generateSimpleFeatures()
-  }
+// Initialize TensorFlow.js
+let tfInitialized = false
+let faceDetector = null
+let isInitializing = false
 
-  generateSimpleFeatures() {
-    // Reduced feature set for speed
-    return [
-      { type: 'horizontal', x: 0.2, y: 0.3, w: 0.6, h: 0.2, weight: 1.2 }, // eyes
-      { type: 'vertical', x: 0.4, y: 0.4, w: 0.2, h: 0.3, weight: 0.8 },   // nose
-      { type: 'horizontal', x: 0.3, y: 0.65, w: 0.4, h: 0.15, weight: 1.0 } // mouth
-    ]
+async function initializeTensorFlow() {
+  if (tfInitialized) return
+  if (isInitializing) {
+    // Wait for initialization to complete
+    while (isInitializing) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return
   }
+  
+  isInitializing = true
+  
+  try {
+    // Set backend preference (WebGL for GPU acceleration, CPU as fallback)
+    await tf.setBackend('webgl')
+    await tf.ready()
+    
+    logger.info('TensorFlow.js initialized with WebGL backend')
+    tfInitialized = true
+  } catch (error) {
+    logger.warn('WebGL backend failed, falling back to CPU:', error)
+    try {
+      await tf.setBackend('cpu')
+      await tf.ready()
+      logger.info('TensorFlow.js initialized with CPU backend')
+      tfInitialized = true
+    } catch (cpuError) {
+      logger.error('Failed to initialize TensorFlow.js:', cpuError)
+      throw new Error('TensorFlow.js initialization failed')
+    }
+  } finally {
+    isInitializing = false
+  }
+}
 
-  async detectFaces(imageData, options = {}) {
-    const { maxFaces = 3, minSize = 48 } = options
-    const { data, width, height } = imageData
+async function initializeFaceDetector() {
+  if (faceDetector) return faceDetector
+  
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
+    )
     
-    const grayscale = this.rgbaToGrayscale(data, width, height)
-    const faces = []
+    faceDetector = await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite'
+      },
+      runningMode: 'IMAGE',
+      minDetectionConfidence: 0.5,
+      minSuppressionThreshold: 0.3
+    })
     
-    // Single scale detection for speed
-    const step = Math.max(8, Math.floor(minSize * 0.3))
+    logger.info('MediaPipe face detector initialized')
+    return faceDetector
+  } catch (error) {
+    logger.error('Failed to initialize face detector:', error)
+    throw new Error('Face detector initialization failed')
+  }
+}
+
+// Fast Gradient Sign Method (FGSM) attack
+class FGSMAttack {
+  constructor(epsilon = 0.03) {
+    this.epsilon = epsilon
+  }
+  
+  async generatePerturbation(imageTensor, targetClass = null) {
+    let model = null
+    let perturbation = null
     
-    for (let y = 0; y < height - minSize; y += step) {
-      for (let x = 0; x < width - minSize; x += step) {
-        const confidence = this.quickFaceScore(grayscale, width, x, y, minSize)
-        
-        if (confidence > 0.6) {
-          faces.push({ x, y, width: minSize, height: minSize, confidence })
+    try {
+      // Create a simple surrogate model for gradient calculation
+      model = this.createSurrogateModel(imageTensor.shape.slice(1))
+      
+      // Create gradient function that computes loss w.r.t input
+      const lossGradFn = tf.grad(input => {
+        const pred = model.predict(input)
+        if (targetClass !== null) {
+          const target = tf.oneHot(targetClass, pred.shape[1])
+          return tf.neg(tf.losses.softmaxCrossEntropy(target, pred))
+        } else {
+          const trueClass = tf.argMax(pred, 1)
+          const target = tf.oneHot(trueClass, pred.shape[1])
+          return tf.losses.softmaxCrossEntropy(target, pred)
+        }
+      })
+      
+      // Calculate gradients with respect to input tensor
+      const gradients = lossGradFn(imageTensor)
+      
+      // Sign of gradients
+      const signGradients = tf.sign(gradients)
+      
+      // Apply epsilon scaling
+      perturbation = tf.mul(signGradients, this.epsilon)
+      
+      // Cleanup intermediate tensors
+      gradients.dispose()
+      signGradients.dispose()
+      
+      return perturbation
+      
+    } catch (error) {
+      logger.error(`FGSM perturbation generation failed: ${error.message}`)
+      
+      // Cleanup on error
+      if (model) model.dispose()
+      if (perturbation) perturbation.dispose()
+      
+      // Try CPU fallback if WebGL failed
+      if (error.message.includes('texture') || error.message.includes('WebGL')) {
+        logger.info('Falling back to CPU backend for FGSM attack')
+        return this.generatePerturbationCPU(imageTensor, targetClass)
+      }
+      
+      throw error
+    } finally {
+      if (model) model.dispose()
+    }
+  }
+  
+  // CPU fallback for large images that exceed WebGL limits
+  async generatePerturbationCPU(imageTensor, targetClass = null) {
+    const originalBackend = tf.getBackend()
+    
+    try {
+      // Switch to CPU backend
+      await tf.setBackend('cpu')
+      await tf.ready()
+      
+      // Create simpler model for CPU processing
+      const model = this.createSimpleCPUModel(imageTensor.shape.slice(1))
+      
+      const lossGradFn = tf.grad(input => {
+        const pred = model.predict(input)
+        const trueClass = tf.argMax(pred, 1)
+        const target = tf.oneHot(trueClass, pred.shape[1])
+        return tf.losses.softmaxCrossEntropy(target, pred)
+      })
+      
+      const gradients = lossGradFn(imageTensor)
+      const signGradients = tf.sign(gradients)
+      const perturbation = tf.mul(signGradients, this.epsilon)
+      
+      // Cleanup
+      gradients.dispose()
+      signGradients.dispose()
+      model.dispose()
+      
+      return perturbation
+      
+    } finally {
+      // Restore original backend
+      if (originalBackend !== 'cpu') {
+        try {
+          await tf.setBackend(originalBackend)
+          await tf.ready()
+        } catch (backendError) {
+          logger.warn(`Failed to restore ${originalBackend} backend:`, backendError)
         }
       }
+    }
+  }
+  
+  // Simplified model for CPU processing
+  createSimpleCPUModel(inputShape) {
+    return tf.sequential({
+      layers: [
+        tf.layers.flatten({ inputShape: inputShape }),
+        tf.layers.dense({ units: 32, activation: 'relu' }),
+        tf.layers.dense({ units: 10, activation: 'softmax' })
+      ]
+    })
+  }
+  
+  createSurrogateModel(inputShape) {
+    try {
+      const [height, width, channels] = inputShape
+      const imageSize = height * width
       
-      if (y % (step * 6) === 0) {
-        await this.yieldControl()
+      // Adaptive model architecture based on image size to prevent WebGL texture limits
+      let filters1, filters2, filters3, kernelSize1, kernelSize2
+      
+      if (imageSize > 2048 * 2048) {
+        // Large images: minimal model to avoid WebGL limits
+        filters1 = 8
+        filters2 = 16  
+        filters3 = 24
+        kernelSize1 = 3
+        kernelSize2 = 3
+        logger.info(`Using minimal surrogate model for large image: ${width}×${height}`)
+      } else if (imageSize > 1024 * 1024) {
+        // Medium images: reduced complexity
+        filters1 = 12
+        filters2 = 24
+        filters3 = 32
+        kernelSize1 = 3
+        kernelSize2 = 3
+      } else {
+        // Small images: full model
+        filters1 = 16
+        filters2 = 32
+        filters3 = 64
+        kernelSize1 = 5
+        kernelSize2 = 5
       }
-    }
-    
-    return this.simpleNMS(faces, 0.4).slice(0, maxFaces)
-  }
-
-  rgbaToGrayscale(data, width, height) {
-    const grayscale = new Float32Array(width * height)
-    for (let i = 0; i < width * height; i++) {
-      const r = data[i * 4]
-      const g = data[i * 4 + 1]
-      const b = data[i * 4 + 2]
-      grayscale[i] = (r * 0.299 + g * 0.587 + b * 0.114) / 255.0
-    }
-    return grayscale
-  }
-
-  quickFaceScore(grayscale, width, x, y, size) {
-    let score = 0
-    
-    for (const feature of this.features) {
-      const fx = Math.floor(x + feature.x * size)
-      const fy = Math.floor(y + feature.y * size)
-      const fw = Math.floor(feature.w * size)
-      const fh = Math.floor(feature.h * size)
       
-      let sum1 = 0, sum2 = 0, count1 = 0, count2 = 0
+      const model = tf.sequential({
+        layers: [
+          tf.layers.conv2d({
+            filters: filters1,
+            kernelSize: kernelSize1,
+            activation: 'relu',
+            inputShape: inputShape,
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.maxPooling2d({ 
+            poolSize: 2,
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.conv2d({ 
+            filters: filters2, 
+            kernelSize: kernelSize2, 
+            activation: 'relu',
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.maxPooling2d({ 
+            poolSize: 2,
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.conv2d({ 
+            filters: filters3, 
+            kernelSize: 3, 
+            activation: 'relu',
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.globalAveragePooling2d({
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.dense({ units: Math.min(64, filters3), activation: 'relu' }),
+          tf.layers.dropout({ rate: 0.3 }), // Higher dropout for stability
+          tf.layers.dense({ units: 10, activation: 'softmax' })
+        ]
+      })
       
-      for (let dy = 0; dy < fh; dy += 2) {
-        for (let dx = 0; dx < fw; dx += 2) {
-          const px = fx + dx
-          const py = fy + dy
+      // Use lightweight optimizer for large images
+      const optimizer = imageSize > 2048 * 2048 ? 'sgd' : 'adam'
+      
+      model.compile({
+        optimizer: optimizer,
+        loss: 'categoricalCrossentropy',
+        metrics: ['accuracy']
+      })
+      
+      logger.debug(`Surrogate model created: ${filters1}-${filters2}-${filters3} filters, ${kernelSize1}×${kernelSize2} kernels`)
+      return model
+    } catch (error) {
+      logger.error('Failed to create surrogate model:', error)
+      throw new Error('Model creation failed: ' + error.message)
+    }
+  }
+}
+
+// Iterative FGSM (I-FGSM) attack
+class IterativeFGSMAttack extends FGSMAttack {
+  constructor(epsilon = 0.03, iterations = 10, stepSize = 0.007) {
+    super(epsilon)
+    this.iterations = iterations
+    this.stepSize = stepSize
+  }
+  
+  async generatePerturbation(imageTensor, targetClass = null, progressCallback = null) {
+    const model = this.createSurrogateModel(imageTensor.shape.slice(1))
+    
+    let adversarialImage = tf.clone(imageTensor)
+    
+    // Create gradient function once outside the loop
+    const lossGradFn = tf.grad(input => {
+      const pred = model.predict(input)
+      if (targetClass !== null) {
+        const target = tf.oneHot(targetClass, pred.shape[1])
+        return tf.neg(tf.losses.softmaxCrossEntropy(target, pred))
+      } else {
+        const trueClass = tf.argMax(pred, 1)
+        const target = tf.oneHot(trueClass, pred.shape[1])
+        return tf.losses.softmaxCrossEntropy(target, pred)
+      }
+    })
+    
+    // Async iteration with throttling and memory management
+    for (let i = 0; i < this.iterations; i++) {
+      const iterationStart = performance.now()
+      const prevAdversarial = adversarialImage
+      
+      try {
+        // Perform one iteration of gradient computation
+        const newAdversarial = tf.tidy(() => {
+          const gradients = lossGradFn(adversarialImage)
+          const signGradients = tf.sign(gradients)
+          const step = tf.mul(signGradients, this.stepSize)
           
-          if (px < width && py < grayscale.length / width) {
-            const value = grayscale[py * width + px]
-            
-            if (feature.type === 'horizontal') {
-              if (dy < fh / 2) { sum1 += value; count1++ }
-              else { sum2 += value; count2++ }
-            } else {
-              if (dx < fw / 2) { sum1 += value; count1++ }
-              else { sum2 += value; count2++ }
+          const tentativeAdversarial = tf.add(adversarialImage, step)
+          
+          // Clip to epsilon-ball around original image
+          const perturbation = tf.sub(tentativeAdversarial, imageTensor)
+          const clippedPerturbation = tf.clipByValue(perturbation, -this.epsilon, this.epsilon)
+          const clippedAdversarial = tf.add(imageTensor, clippedPerturbation)
+          
+          // Clip to valid pixel range [-1, 1]
+          return tf.clipByValue(clippedAdversarial, -1, 1)
+        })
+        
+        // Dispose previous iteration's result (except first iteration)
+        if (i > 0) {
+          prevAdversarial.dispose()
+        }
+        
+        adversarialImage = newAdversarial
+        
+        // Update progress
+        if (progressCallback) {
+          progressCallback((i + 1) / this.iterations * 100)
+        }
+        
+        // Memory management and yielding - match worker behavior
+        if (i % 5 === 0) { // Every 5 iterations
+          // Check memory usage
+          const memInfo = tf.memory()
+          if (memInfo.numBytes > 800 * 1024 * 1024) { // > 800MB - same as worker
+            logger.warn(`High memory usage: ${Math.round(memInfo.numBytes / 1024 / 1024)}MB, forcing cleanup`)
+            // Force garbage collection instead of manual tensor disposal
+            if (typeof gc !== 'undefined') {
+              gc()
             }
           }
         }
-      }
-      
-      const avg1 = count1 > 0 ? sum1 / count1 : 0
-      const avg2 = count2 > 0 ? sum2 / count2 : 0
-      score += Math.abs(avg1 - avg2) * feature.weight
-    }
-    
-    return Math.min(1.0, score / this.features.length)
-  }
-
-  simpleNMS(faces, threshold) {
-    if (faces.length === 0) return []
-    
-    faces.sort((a, b) => b.confidence - a.confidence)
-    const keep = [faces[0]]
-    
-    for (let i = 1; i < faces.length; i++) {
-      let suppress = false
-      for (const kept of keep) {
-        const overlap = this.calculateOverlap(faces[i], kept)
-        if (overlap > threshold) {
-          suppress = true
-          break
+        
+        // Yield control if needed to prevent browser freezing
+        if (globalThrottle.shouldYield(iterationStart)) {
+          await globalThrottle.yield('normal')
         }
-      }
-      if (!suppress && keep.length < 4) {
-        keep.push(faces[i])
+        
+      } catch (error) {
+        // Cleanup on iteration error
+        if (i > 0 && prevAdversarial) {
+          prevAdversarial.dispose()
+        }
+        
+        // Try CPU fallback if WebGL fails mid-iteration
+        if (error.message.includes('texture') || error.message.includes('WebGL')) {
+          logger.warn(`WebGL error at iteration ${i + 1}, falling back to CPU`)
+          if (adversarialImage) adversarialImage.dispose()
+          if (model) model.dispose()
+          throw new Error('FALLBACK_TO_CPU')
+        }
+        
+        throw error
       }
     }
     
-    return keep
-  }
-
-  calculateOverlap(rect1, rect2) {
-    const x1 = Math.max(rect1.x, rect2.x)
-    const y1 = Math.max(rect1.y, rect2.y)
-    const x2 = Math.min(rect1.x + rect1.width, rect2.x + rect2.width)
-    const y2 = Math.min(rect1.y + rect1.height, rect2.y + rect2.height)
+    // Calculate final perturbation
+    const finalPerturbation = tf.sub(adversarialImage, imageTensor)
     
-    if (x2 <= x1 || y2 <= y1) return 0
+    // Cleanup
+    adversarialImage.dispose()
+    model.dispose()
     
-    const intersection = (x2 - x1) * (y2 - y1)
-    const union = rect1.width * rect1.height + rect2.width * rect2.height - intersection
-    return intersection / union
+    return finalPerturbation
   }
-
-  async yieldControl() {
-    if (globalThrottle.shouldYield()) {
-      return globalThrottle.yield()
-    }
-    return Promise.resolve()
-  }
-}
-
-// Lightweight vision model for fast adversarial generation
-class FastVisionModel {
-  constructor(modelType = 'clip') {
-    this.modelType = modelType
-    this.filters = this.initializeFilters()
-  }
-
-  initializeFilters() {
-    // Simple but effective filters
-    const filters = []
-    for (let i = 0; i < 16; i++) {
-      filters.push({
-        weights: new Float32Array(9).map(() => (Math.random() - 0.5) * 0.4),
-        bias: (Math.random() - 0.5) * 0.2
+  
+  // CPU fallback for iterative attacks when WebGL fails
+  async generatePerturbationCPU(imageTensor, targetClass = null, progressCallback = null) {
+    const originalBackend = tf.getBackend()
+    
+    try {
+      // Switch to CPU backend
+      await tf.setBackend('cpu')
+      await tf.ready()
+      
+      // Create simpler model for CPU processing
+      const model = this.createSimpleCPUModel(imageTensor.shape.slice(1))
+      
+      let adversarialImage = tf.clone(imageTensor)
+      
+      const lossGradFn = tf.grad(input => {
+        const pred = model.predict(input)
+        const trueClass = tf.argMax(pred, 1)
+        const target = tf.oneHot(trueClass, pred.shape[1])
+        return tf.losses.softmaxCrossEntropy(target, pred)
       })
-    }
-    return filters
-  }
-
-  async computeGradients(imageData) {
-    const { data, width, height } = imageData
-    const gradients = new Float32Array(data.length)
-    
-    // Fast gradient approximation
-    const chunkSize = Math.min(2000, Math.floor(data.length / 6))
-    
-    for (let start = 0; start < data.length; start += chunkSize) {
-      const end = Math.min(start + chunkSize, data.length)
       
-      for (let i = start; i < end; i += 4) {
-        if (i + 3 < data.length) {
-          const pixelIdx = Math.floor(i / 4)
-          const x = pixelIdx % width
-          const y = Math.floor(pixelIdx / width)
-          
-          // Simple gradient based on local features
-          const baseGrad = this.computePixelGradient(data, x, y, width, height)
-          
-          gradients[i] = baseGrad * 0.299     // R
-          gradients[i + 1] = baseGrad * 0.587 // G  
-          gradients[i + 2] = baseGrad * 0.114 // B
-          gradients[i + 3] = 0                // A
+      // Reduced iterations for CPU
+      const cpuIterations = Math.min(this.iterations, 5)
+      
+      for (let i = 0; i < cpuIterations; i++) {
+        const prevAdversarial = adversarialImage
+        
+        const gradients = lossGradFn(adversarialImage)
+        const signGradients = tf.sign(gradients)
+        const step = tf.mul(signGradients, this.stepSize)
+        
+        const tentativeAdversarial = tf.add(adversarialImage, step)
+        const perturbation = tf.sub(tentativeAdversarial, imageTensor)
+        const clippedPerturbation = tf.clipByValue(perturbation, -this.epsilon, this.epsilon)
+        const clippedAdversarial = tf.add(imageTensor, clippedPerturbation)
+        
+        adversarialImage = tf.clipByValue(clippedAdversarial, -1, 1)
+        
+        // Cleanup
+        if (i > 0) prevAdversarial.dispose()
+        gradients.dispose()
+        signGradients.dispose()
+        step.dispose()
+        tentativeAdversarial.dispose()
+        perturbation.dispose()
+        clippedPerturbation.dispose()
+        clippedAdversarial.dispose()
+        
+        if (progressCallback) {
+          progressCallback((i + 1) / cpuIterations * 100)
         }
       }
       
-      if (start % (chunkSize * 2) === 0) {
-        await this.yieldControl()
-      }
-    }
-    
-    return gradients
-  }
-
-  computePixelGradient(data, x, y, width, height) {
-    let response = 0
-    
-    // Apply a few filters for gradient estimation
-    for (let f = 0; f < Math.min(4, this.filters.length); f++) {
-      const filter = this.filters[f]
-      let conv = 0
+      const finalPerturbation = tf.sub(adversarialImage, imageTensor)
       
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx
-          const ny = y + dy
-          
-          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-            const idx = (ny * width + nx) * 4
-            const gray = (data[idx] + data[idx + 1] + data[idx + 2]) / (3 * 255)
-            conv += gray * filter.weights[(dy + 1) * 3 + (dx + 1)]
-          }
+      // Cleanup
+      adversarialImage.dispose()
+      model.dispose()
+      
+      return finalPerturbation
+      
+    } finally {
+      // Restore original backend
+      if (originalBackend !== 'cpu') {
+        try {
+          await tf.setBackend(originalBackend)
+          await tf.ready()
+        } catch (backendError) {
+          logger.warn(`Failed to restore ${originalBackend} backend:`, backendError)
         }
       }
-      
-      response += Math.tanh(conv + filter.bias)
     }
-    
-    return response / 4
-  }
-
-  async yieldControl() {
-    if (globalThrottle.shouldYield()) {
-      return globalThrottle.yield()
-    }
-    return Promise.resolve()
   }
 }
 
-// Fast adversarial processing functions
+// Main processing functions
 export async function processImageWithFawkes(imageDataURL, protectionLevel = 'mid', progressCallback, abortSignal) {
+  await initializeTensorFlow()
+  
+  if (abortSignal?.aborted) {
+    throw new Error('Operation aborted')
+  }
+  
   try {
-    if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-    if (progressCallback) progressCallback(0)
+    progressCallback?.(10)
     
-    const imageData = await getImageDataFromDataURL(imageDataURL)
-    if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-    if (progressCallback) progressCallback(10)
+    // Convert image to tensor
+    const imageTensor = await imageDataURLToTensor(imageDataURL)
+    progressCallback?.(20)
     
-    const faceDetector = new FastFaceDetector()
-    const faces = await faceDetector.detectFaces(imageData, {
-      maxFaces: protectionLevel === 'high' ? 3 : 2
-    })
+    // Detect faces
+    const faces = await detectFaces(imageDataURL)
+    progressCallback?.(40)
     
-    if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-    if (progressCallback) progressCallback(30)
+    if (faces.length === 0) {
+      throw new Error('No faces detected in the image. Fawkes protection requires faces to be present.')
+    }
     
-    const model = new FastVisionModel('clip')
-    const epsilon = { 'low': 0.03, 'mid': 0.05, 'high': 0.07 }[protectionLevel] || 0.05
+    // Apply adversarial perturbations based on protection level
+    let epsilon, iterations
+    switch (protectionLevel) {
+      case 'low':
+        epsilon = 0.02
+        iterations = 5
+        break
+      case 'mid':
+        epsilon = 0.03
+        iterations = 10
+        break
+      case 'high':
+        epsilon = 0.05
+        iterations = 15
+        break
+      default:
+        epsilon = 0.03
+        iterations = 10
+    }
     
-    const cloakedImageData = await applyFastAdversarialAttack(
-      imageData, model, faces, epsilon, 8, // Fast iterations
-      (progress) => {
-        if (progressCallback) progressCallback(30 + progress * 0.65)
-      },
-      abortSignal
-    )
+    // Apply adversarial perturbations with fallback handling
+    let perturbation
+    try {
+      const attack = new IterativeFGSMAttack(epsilon, iterations)
+      perturbation = await attack.generatePerturbation(
+        imageTensor,
+        null,
+        (iterProgress) => progressCallback?.(40 + iterProgress * 0.5)
+      )
+    } catch (error) {
+      if (error.message === 'FALLBACK_TO_CPU' || error.message.includes('texture') || error.message.includes('WebGL')) {
+        logger.info('WebGL failed, trying CPU approach for Fawkes')
+        
+        // Try CPU-based iterative approach first
+        try {
+          const cpuAttack = new IterativeFGSMAttack(epsilon, Math.min(iterations, 5)) // Reduced iterations
+          perturbation = await cpuAttack.generatePerturbationCPU(
+            imageTensor,
+            null,
+            (iterProgress) => progressCallback?.(40 + iterProgress * 0.5)
+          )
+        } catch (cpuError) {
+          // If CPU iterative fails, fall back to simple FGSM
+          logger.info('CPU iterative failed, using simple FGSM')
+          const simpleCpuAttack = new FGSMAttack(epsilon * 0.7)
+          perturbation = await simpleCpuAttack.generatePerturbationCPU(imageTensor)
+          progressCallback?.(90)
+        }
+      } else {
+        throw error
+      }
+    }
     
-    if (progressCallback) progressCallback(98)
+    // Apply perturbation with explicit bounds checking
+    const adversarialTensor = tf.add(imageTensor, perturbation)
+    const clippedTensor = tf.clipByValue(adversarialTensor, -1, 1)
     
-    const resultDataURL = imageDataToDataURL(cloakedImageData)
-    if (progressCallback) progressCallback(100)
+    // Debug: Verify tensor range before conversion
+    const minVal = await clippedTensor.min().data()
+    const maxVal = await clippedTensor.max().data()
+    logger.debug(`Tensor range before conversion: [${minVal[0].toFixed(3)}, ${maxVal[0].toFixed(3)}]`)
     
-    return resultDataURL
+    // Convert back to image data URL
+    const resultDataURL = await tensorToImageDataURL(clippedTensor)
+    progressCallback?.(100)
+    
+    // Cleanup
+    imageTensor.dispose()
+    perturbation.dispose()
+    adversarialTensor.dispose()
+    clippedTensor.dispose()
+    
+    return {
+      originalDataURL: imageDataURL,
+      processedDataURL: resultDataURL,
+      method: 'fawkes',
+      protectionLevel,
+      facesDetected: faces.length,
+      epsilon,
+      iterations
+    }
+    
   } catch (error) {
-    logger.error('Fast Fawkes processing error:', error)
+    logger.error('Fawkes processing failed:', error)
     throw error
   }
 }
 
 export async function processImageWithAdvCloak(imageDataURL, epsilon = 0.04, iterations = 12, progressCallback, abortSignal) {
-  return new Promise(async (resolve, reject) => {
+  await initializeTensorFlow()
+  
+  if (abortSignal?.aborted) {
+    throw new Error('Operation aborted')
+  }
+  
+  try {
+    progressCallback?.(10)
+    
+    const imageTensor = await imageDataURLToTensor(imageDataURL)
+    progressCallback?.(20)
+    
+    // AdvCloak works on any image, not just faces
+    const faces = await detectFaces(imageDataURL)
+    progressCallback?.(30)
+    
+    // Use FGSM attack for AdvCloak with fallback handling
+    let perturbation
     try {
-      if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-      if (progressCallback) progressCallback(0)
-      
-      // Add timeout for AdvCloak processing (10 minutes max)
-      const processingTimeout = setTimeout(() => {
-        reject(new Error('AdvCloak processing timeout - please try with smaller image or lower iterations'))
-      }, 600000) // 10 minutes
-      
-      const cleanup = () => clearTimeout(processingTimeout)
-      
-      try {
-        const imageData = await getImageDataFromDataURL(imageDataURL)
-        if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-        if (progressCallback) progressCallback(10)
+      const attack = new FGSMAttack(epsilon)
+      perturbation = await attack.generatePerturbation(imageTensor)
+      progressCallback?.(70)
+    } catch (error) {
+      if (error.message === 'FALLBACK_TO_CPU' || error.message.includes('texture') || error.message.includes('WebGL')) {
+        logger.info('WebGL failed, trying CPU backend for AdvCloak')
         
-        const model = new FastVisionModel('ensemble')
-        
-        const cloakedImageData = await applyFastGlobalAttack(
-          imageData, model, Math.min(epsilon, 0.06), Math.min(iterations, 15),
-          (progress) => {
-            if (progressCallback) progressCallback(10 + progress * 0.85)
-          },
-          abortSignal
-        )
-        
-        if (progressCallback) progressCallback(98)
-        
-        const resultDataURL = imageDataToDataURL(cloakedImageData)
-        if (progressCallback) progressCallback(100)
-        
-        cleanup()
-        resolve(resultDataURL)
-      } catch (error) {
-        cleanup()
+        // Try with simpler CPU-based approach
+        const cpuAttack = new FGSMAttack(epsilon * 0.5) // Reduce epsilon for CPU
+        perturbation = await cpuAttack.generatePerturbationCPU(imageTensor)
+        progressCallback?.(70)
+      } else {
         throw error
       }
-    } catch (error) {
-      logger.error('Fast AdvCloak processing error:', error)
-      reject(error)
     }
+    
+    const adversarialTensor = tf.add(imageTensor, perturbation)
+    const clippedTensor = tf.clipByValue(adversarialTensor, -1, 1)
+    
+    // Debug: Verify tensor range before conversion
+    const minVal = await clippedTensor.min().data()
+    const maxVal = await clippedTensor.max().data()
+    logger.debug(`AdvCloak tensor range before conversion: [${minVal[0].toFixed(3)}, ${maxVal[0].toFixed(3)}]`)
+    
+    const resultDataURL = await tensorToImageDataURL(clippedTensor)
+    progressCallback?.(100)
+    
+    // Cleanup
+    imageTensor.dispose()
+    perturbation.dispose()
+    adversarialTensor.dispose()
+    clippedTensor.dispose()
+    
+    return {
+      originalDataURL: imageDataURL,
+      processedDataURL: resultDataURL,
+      method: 'advcloak',
+      epsilon,
+      iterations,
+      facesDetected: faces.length
+    }
+    
+  } catch (error) {
+    logger.error('AdvCloak processing failed:', error)
+    throw error
+  }
+}
+
+// Face detection using MediaPipe - exported for worker communication
+export async function detectFaces(imageDataURL) {
+  const detector = await initializeFaceDetector()
+  
+  try {
+    // Create image element for MediaPipe
+    const img = new Image()
+    img.src = imageDataURL
+    
+    await new Promise((resolve, reject) => {
+      img.onload = resolve
+      img.onerror = reject
+    })
+    
+    // Detect faces
+    const detections = detector.detect(img)
+    
+    return detections.detections.map(detection => ({
+      x: detection.boundingBox.originX,
+      y: detection.boundingBox.originY,
+      width: detection.boundingBox.width,
+      height: detection.boundingBox.height,
+      confidence: detection.categories[0]?.score || 0,
+      keypoints: detection.keypoints?.map(kp => ({ x: kp.x, y: kp.y })) || []
+    }))
+    
+  } catch (error) {
+    logger.error('Face detection failed:', error)
+    return []
+  }
+}
+
+// Utility functions for tensor/image conversion
+async function imageDataURLToTensor(dataURL) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        const ctx = canvas.getContext('2d')
+        
+        const originalWidth = img.width
+        const originalHeight = img.height
+        
+        // More conservative limits to prevent conv2d intermediate tensor overflow
+        const maxDimension = 2048 // Reduced to prevent conv2d texture overflow
+        const maxPixels = 2048 * 2048 // Max 4MP to prevent memory issues
+        
+        let finalWidth = originalWidth
+        let finalHeight = originalHeight
+        
+        // Check if resizing is needed
+        const totalPixels = originalWidth * originalHeight
+        if (originalWidth > maxDimension || originalHeight > maxDimension || totalPixels > maxPixels) {
+          // Calculate scale to fit both dimension and pixel constraints
+          const dimensionScale = Math.min(maxDimension / originalWidth, maxDimension / originalHeight)
+          const pixelScale = Math.sqrt(maxPixels / totalPixels)
+          const scale = Math.min(dimensionScale, pixelScale)
+          
+          finalWidth = Math.round(originalWidth * scale)
+          finalHeight = Math.round(originalHeight * scale)
+          
+          logger.info(`Resizing image from ${originalWidth}×${originalHeight} to ${finalWidth}×${finalHeight} to prevent WebGL texture overflow`)
+        }
+        
+        canvas.width = finalWidth
+        canvas.height = finalHeight
+        
+        // Draw with resizing if necessary
+        ctx.drawImage(img, 0, 0, originalWidth, originalHeight, 0, 0, finalWidth, finalHeight)
+        
+        // Convert to tensor and normalize to [-1, 1]
+        const tensor = tf.browser.fromPixels(canvas)
+          .expandDims(0)
+          .toFloat()
+          .div(255.0)    // First normalize to [0, 1]
+          .mul(2.0)      // Scale to [0, 2]
+          .sub(1.0)      // Shift to [-1, 1]
+        
+        // Verify the tensor is in expected range
+        const minVal = tf.min(tensor).dataSync()[0]
+        const maxVal = tf.max(tensor).dataSync()[0]
+        logger.debug(`Input tensor range: [${minVal.toFixed(3)}, ${maxVal.toFixed(3)}], shape: ${tensor.shape}`)
+        
+        if (minVal < -1.1 || maxVal > 1.1) {
+          logger.warn(`Tensor values outside expected [-1, 1] range: [${minVal}, ${maxVal}]`)
+          const clippedTensor = tf.clipByValue(tensor, -1, 1)
+          tensor.dispose()
+          resolve(clippedTensor)
+        } else {
+          resolve(tensor)
+        }
+      } catch (error) {
+        logger.error('Failed to convert image to tensor:', error)
+        reject(new Error('Image to tensor conversion failed: ' + error.message))
+      }
+    }
+    img.onerror = (error) => {
+      logger.error('Failed to load image:', error)
+      reject(new Error('Failed to load image for processing'))
+    }
+    img.src = dataURL
   })
 }
 
-async function applyFastAdversarialAttack(imageData, model, faces, epsilon, iterations, progressCallback, abortSignal) {
-  const { data, width, height } = imageData
-  const newData = new Uint8ClampedArray(data)
-  
-  // Quick face-focused perturbations
-  for (let i = 0; i < faces.length; i++) {
-    await applyFacePerturbations(newData, data, faces[i], epsilon * 1.5, width, height)
+async function tensorToImageDataURL(tensor) {
+  try {
+    // Ensure tensor is properly clipped to [-1, 1] range first
+    const clippedTensor = tf.clipByValue(tensor, -1, 1)
     
-    const faceProgress = ((i + 1) / faces.length) * 40
-    if (progressCallback) progressCallback(faceProgress)
+    // Denormalize from [-1, 1] to [0, 1] for tf.browser.toPixels
+    const denormalized = clippedTensor.add(1.0).div(2.0).clipByValue(0, 1)
     
-    await yieldControl(abortSignal)
-  }
-  
-  // Fast global optimization
-  await applyFastGlobalPerturbations(newData, data, model, epsilon * 0.7, iterations, width, height, progressCallback, abortSignal)
-  
-  return new ImageData(newData, width, height)
-}
-
-async function applyFastGlobalAttack(imageData, model, epsilon, iterations, progressCallback, abortSignal) {
-  const { data, width, height } = imageData
-  const newData = new Uint8ClampedArray(data)
-  
-  await applyFastGlobalPerturbations(newData, data, model, epsilon, iterations, width, height, progressCallback, abortSignal)
-  
-  return new ImageData(newData, width, height)
-}
-
-async function applyFacePerturbations(newData, originalData, face, epsilon, width, height) {
-  const { x, y, width: faceWidth, height: faceHeight } = face
-  
-  // Simple pattern-based face perturbations
-  const patterns = [
-    { region: [0.2, 0.3, 0.6, 0.2], strength: 1.2 }, // eyes
-    { region: [0.4, 0.4, 0.2, 0.3], strength: 0.8 },  // nose
-    { region: [0.3, 0.65, 0.4, 0.15], strength: 1.0 } // mouth
-  ]
-  
-  for (const pattern of patterns) {
-    const [rx, ry, rw, rh] = pattern.region
-    const regionX = Math.floor(x + faceWidth * rx)
-    const regionY = Math.floor(y + faceHeight * ry)
-    const regionW = Math.floor(faceWidth * rw)
-    const regionH = Math.floor(faceHeight * rh)
+    // Remove batch dimension and get original dimensions
+    const squeezed = denormalized.squeeze()
+    const [height, width, channels] = squeezed.shape
     
-    for (let dy = 0; dy < regionH; dy += 2) {
-      for (let dx = 0; dx < regionW; dx += 2) {
-        const px = regionX + dx
-        const py = regionY + dy
-        
-        if (px < width && py < height) {
-          const idx = (py * width + px) * 4
-          
-          const noise = (Math.sin(dx * 0.3) * Math.cos(dy * 0.3)) * epsilon * pattern.strength * 255
-          
-          for (let c = 0; c < 3; c++) {
-            const originalValue = originalData[idx + c]
-            const perturbedValue = originalValue + noise
-            newData[idx + c] = Math.round(Math.max(0, Math.min(255, perturbedValue)))
-          }
-        }
-      }
-    }
-  }
-}
-
-async function applyFastGlobalPerturbations(newData, originalData, model, epsilon, iterations, width, height, progressCallback, abortSignal) {
-  const alpha = epsilon / iterations
-  const totalPixels = width * height
-  
-  for (let iter = 0; iter < iterations; iter++) {
-    const currentImageData = new ImageData(newData, width, height)
-    const gradients = await model.computeGradients(currentImageData)
+    // Convert to canvas with original dimensions
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
     
-    // Fast pixel updates
-    const chunkSize = Math.min(4000, Math.floor(totalPixels / 8))
+    // tf.browser.toPixels expects values in [0, 1] and will scale to [0, 255] internally
+    await tf.browser.toPixels(squeezed, canvas)
     
-    for (let start = 0; start < totalPixels; start += chunkSize) {
-      const end = Math.min(start + chunkSize, totalPixels)
-      
-      for (let pixelIdx = start; pixelIdx < end; pixelIdx++) {
-        const dataIdx = pixelIdx * 4
-        
-        for (let c = 0; c < 3; c++) {
-          const gradIdx = dataIdx + c
-          const grad = gradients[gradIdx]
-          
-          const originalValue = originalData[dataIdx + c] / 255.0
-          let currentValue = newData[dataIdx + c] / 255.0
-          
-          currentValue += alpha * Math.sign(grad)
-          
-          const diff = currentValue - originalValue
-          if (Math.abs(diff) > epsilon) {
-            currentValue = originalValue + epsilon * Math.sign(diff)
-          }
-          
-          newData[dataIdx + c] = Math.round(Math.max(0, Math.min(255, currentValue * 255)))
-        }
-      }
-      
-      if (start % (chunkSize * 3) === 0) {
-        await yieldControl(abortSignal)
-      }
+    // Use higher quality JPEG compression to preserve quality
+    // Start with high quality and only reduce if file is too large
+    let quality = 0.95
+    let dataURL = canvas.toDataURL('image/jpeg', quality)
+    
+    // If file is very large (>5MB as base64), reduce quality slightly
+    const sizeEstimate = dataURL.length * 0.75 / 1024 / 1024 // Rough MB estimate
+    if (sizeEstimate > 5) {
+      quality = 0.85
+      dataURL = canvas.toDataURL('image/jpeg', quality)
     }
     
-    if (progressCallback) {
-      const progress = 40 + ((iter + 1) / iterations) * 50
-      progressCallback(progress)
-    }
+    logger.debug(`Image converted: ${width}x${height}, estimated size: ${sizeEstimate.toFixed(2)}MB, quality: ${Math.round(quality * 100)}%`)
     
-    await yieldControl(abortSignal)
+    // Cleanup
+    clippedTensor.dispose()
+    denormalized.dispose()
+    squeezed.dispose()
+    
+    return dataURL
+    
+  } catch (error) {
+    logger.error('Tensor to image conversion failed:', error)
+    throw new Error('Failed to convert tensor to image: ' + error.message)
   }
 }
 
-async function yieldControl(abortSignal) {
-  if (abortSignal?.aborted) {
-    throw new Error('Processing cancelled by user')
+// Memory cleanup utility
+export function cleanup() {
+  tf.disposeVariables()
+  if (faceDetector) {
+    faceDetector.close?.()
+    faceDetector = null
   }
-  if (globalThrottle.shouldYield()) {
-    return globalThrottle.yield()
-  }
-  return Promise.resolve()
+  logger.info('TensorFlow.js resources cleaned up')
 } 

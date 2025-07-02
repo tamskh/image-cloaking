@@ -1,66 +1,54 @@
-import { useCallback, useState } from 'react'
-import { useDropzone } from 'react-dropzone'
-import { Upload, Image as ImageIcon, X, AlertCircle } from 'lucide-react'
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB
-const ACCEPTED_TYPES = {
-  'image/jpeg': ['.jpg', '.jpeg'],
-  'image/png': ['.png'],
-  'image/webp': ['.webp']
-}
+import React, { useState, useCallback } from 'react'
+import { Upload, X, Shield, Lock, Eye } from 'lucide-react'
 
 function ImageUploader({ onImageSelect }) {
+  const [isDragOver, setIsDragOver] = useState(false)
   const [preview, setPreview] = useState(null)
-  const [error, setError] = useState(null)
 
-  const onDrop = useCallback((acceptedFiles, rejectedFiles) => {
-    setError(null)
-    
-    if (rejectedFiles.length > 0) {
-      const rejection = rejectedFiles[0]
-      if (rejection.errors[0]?.code === 'file-too-large') {
-        setError('File too large. Please select an image under 10MB.')
-      } else if (rejection.errors[0]?.code === 'file-invalid-type') {
-        setError('Invalid file type. Please select a JPG, PNG, or WebP image.')
-      } else {
-        setError('Invalid file. Please try another image.')
-      }
-      return
-    }
-
-    if (acceptedFiles.length > 0) {
-      const file = acceptedFiles[0]
-      
-      // Create preview
+  const handleImageSelect = useCallback((file) => {
+    if (file && file.type.startsWith('image/')) {
       const reader = new FileReader()
       reader.onload = (e) => {
         setPreview(e.target.result)
+        onImageSelect(file)
       }
       reader.readAsDataURL(file)
-      
-      // Pass file to parent
-      onImageSelect(file)
     }
   }, [onImageSelect])
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: ACCEPTED_TYPES,
-    maxSize: MAX_FILE_SIZE,
-    multiple: false
-  })
+  const handleDrop = useCallback((e) => {
+    e.preventDefault()
+    setIsDragOver(false)
+    
+    const file = e.dataTransfer.files[0]
+    handleImageSelect(file)
+  }, [handleImageSelect])
 
-  const handleRemove = () => {
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault()
+    setIsDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault()
+    setIsDragOver(false)
+  }, [])
+
+  const handleFileInput = useCallback((e) => {
+    const file = e.target.files[0]
+    handleImageSelect(file)
+  }, [handleImageSelect])
+
+  const handleRemove = useCallback(() => {
     setPreview(null)
-    setError(null)
     onImageSelect(null)
-  }
+  }, [onImageSelect])
 
   if (preview) {
     return (
       <div className="card max-w-2xl mx-auto">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900">Selected Image</h3>
+          <h3 className="text-lg font-semibold text-gray-900">Photo Ready for Protection</h3>
           <button
             onClick={handleRemove}
             className="p-2 text-gray-400 hover:text-gray-600 transition-colors duration-200"
@@ -72,19 +60,26 @@ function ImageUploader({ onImageSelect }) {
         <div className="relative">
           <img 
             src={preview} 
-            alt="Selected for cloaking" 
+            alt="Your photo ready for protection" 
             className="w-full h-auto max-h-96 object-contain rounded-lg"
           />
           <div className="absolute inset-0 bg-black bg-opacity-0 hover:bg-opacity-10 transition-all duration-200 rounded-lg" />
         </div>
         
-        <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-          <p className="text-sm text-gray-600 mb-2">
-            Ready to cloak this image. Choose your protection method and click &quot;Start Cloaking&quot; below.
-          </p>
-          <div className="flex items-center gap-2 text-xs text-green-600">
-            <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-            Processing will happen entirely in your browser
+        <div className="mt-4 p-4 bg-gradient-to-r from-green-50 to-blue-50 rounded-lg border border-green-200">
+          <div className="flex items-start gap-3">
+            <div className="bg-green-100 p-2 rounded-full flex-shrink-0">
+              <Shield className="w-4 h-4 text-green-600" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-700 font-medium mb-1">
+                Your photo is ready! Choose how you want to protect it below.
+              </p>
+              <div className="flex items-center gap-2 text-xs text-green-600">
+                <Lock className="w-3 h-3" />
+                <span>This photo will never leave your device</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -92,72 +87,112 @@ function ImageUploader({ onImageSelect }) {
   }
 
   return (
-    <div className="card max-w-2xl mx-auto">
-      <div className="text-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Upload Your Image</h2>
-        <p className="text-gray-600">
-          Select an image to protect from AI recognition
-        </p>
-      </div>
-
+    <div className="max-w-2xl mx-auto">
+      {/* Upload Area */}
       <div
-        {...getRootProps()}
-        className={`dropzone ${isDragActive ? 'active' : ''}`}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        className={`
+          relative border-2 border-dashed rounded-xl p-8 md:p-12 text-center transition-all duration-300 cursor-pointer
+          ${isDragOver 
+            ? 'border-primary-400 bg-primary-50 scale-[1.02]' 
+            : 'border-gray-300 hover:border-gray-400 bg-gray-50 hover:bg-gray-100'
+          }
+        `}
       >
-        <input {...getInputProps()} />
+        <input
+          type="file"
+          accept="image/*"
+          onChange={handleFileInput}
+          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+        />
         
-        <div className="flex flex-col items-center gap-4">
-          <div className="bg-primary-100 p-4 rounded-full">
-            {isDragActive ? (
-              <Upload className="w-8 h-8 text-primary-600" />
-            ) : (
-              <ImageIcon className="w-8 h-8 text-primary-600" />
-            )}
+        <div className="flex flex-col items-center">
+          <div className={`
+            p-4 rounded-full mb-4 transition-colors duration-300
+            ${isDragOver ? 'bg-primary-100' : 'bg-gray-200'}
+          `}>
+            <Upload className={`
+              w-8 h-8 transition-colors duration-300
+              ${isDragOver ? 'text-primary-600' : 'text-gray-500'}
+            `} />
           </div>
           
-          <div className="text-center">
-            {isDragActive ? (
-              <p className="text-lg font-medium text-primary-600">
-                Drop your image here
-              </p>
-            ) : (
-              <>
-                <p className="text-lg font-medium text-gray-900 mb-1">
-                  Drag & drop your image here
-                </p>
-                <p className="text-gray-500 mb-4">
-                  or click to browse your files
-                </p>
-                <button className="btn-primary">
-                  Choose Image
-                </button>
-              </>
-            )}
+          <h3 className="text-xl font-semibold text-gray-900 mb-2">
+            Upload Your Photo to Protect
+          </h3>
+          <p className="text-gray-600 mb-4 max-w-md">
+            Drag and drop your photo here, or click to select from your device. 
+            Your photo stays 100% private on your device.
+          </p>
+          
+          <div className="flex items-center gap-2 text-sm text-primary-600 bg-primary-50 px-4 py-2 rounded-full mb-6">
+            <Lock className="w-4 h-4" />
+            <span className="font-medium">Never uploaded • Always private</span>
           </div>
+          
+          <button className="bg-primary-600 hover:bg-primary-700 text-white font-medium px-6 py-3 rounded-lg transition-colors duration-200">
+            Choose Photo to Protect
+          </button>
         </div>
       </div>
 
-      {error && (
-        <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
-          <div className="flex items-center gap-2 text-red-700">
-            <AlertCircle className="w-4 h-4" />
-            <span className="text-sm font-medium">{error}</span>
+      {/* Benefits Preview */}
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+          <div className="bg-green-100 p-2 rounded-full mx-auto mb-3 w-fit">
+            <Shield className="w-5 h-5 text-green-600" />
           </div>
+          <div className="font-medium text-gray-900 mb-1">Stop Face Recognition</div>
+          <div className="text-sm text-gray-600">Block Facebook, Google & surveillance AI</div>
         </div>
-      )}
+        
+        <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+          <div className="bg-blue-100 p-2 rounded-full mx-auto mb-3 w-fit">
+            <Eye className="w-5 h-5 text-blue-600" />
+          </div>
+          <div className="font-medium text-gray-900 mb-1">Looks Identical</div>
+          <div className="text-sm text-gray-600">Perfect quality for humans to see</div>
+        </div>
+        
+        <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+          <div className="bg-purple-100 p-2 rounded-full mx-auto mb-3 w-fit">
+            <Lock className="w-5 h-5 text-purple-600" />
+          </div>
+          <div className="font-medium text-gray-900 mb-1">100% Private</div>
+          <div className="text-sm text-gray-600">Never uploaded anywhere</div>
+        </div>
+      </div>
 
+      {/* Technical Info */}
       <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-600">
         <div className="text-center p-3 bg-gray-50 rounded-lg">
           <div className="font-medium text-gray-900 mb-1">Supported Formats</div>
-          <div>JPG, PNG, WebP</div>
+          <div>JPG, PNG, WebP, HEIC</div>
         </div>
         <div className="text-center p-3 bg-gray-50 rounded-lg">
           <div className="font-medium text-gray-900 mb-1">Max File Size</div>
-          <div>10MB</div>
+          <div>10MB per photo</div>
         </div>
         <div className="text-center p-3 bg-gray-50 rounded-lg">
-          <div className="font-medium text-gray-900 mb-1">Privacy</div>
-          <div>100% Client-side</div>
+          <div className="font-medium text-gray-900 mb-1">Processing Time</div>
+          <div>Usually 1-3 minutes</div>
+        </div>
+      </div>
+
+      {/* Trust Signal */}
+      <div className="mt-6 p-4 bg-gradient-to-r from-green-50 to-blue-50 rounded-lg border border-green-200">
+        <div className="flex items-center justify-center gap-3 text-sm">
+          <div className="flex items-center gap-2 text-green-700">
+            <Lock className="w-4 h-4" />
+            <span className="font-medium">Your photos never leave your device</span>
+          </div>
+          <div className="w-1 h-1 bg-gray-400 rounded-full"></div>
+          <div className="flex items-center gap-2 text-blue-700">
+            <Eye className="w-4 h-4" />
+            <span className="font-medium">Open source & verifiable</span>
+          </div>
         </div>
       </div>
     </div>

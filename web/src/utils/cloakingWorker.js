@@ -1,561 +1,957 @@
 /**
- * Self-contained Web Worker for fast image cloaking
- * Embeds optimized algorithms to avoid import issues
+ * TensorFlow.js Web Worker for adversarial image processing
+ * Focuses on compute-heavy adversarial attacks, receives face detection from main thread
  */
 
-// Simple inline logger for worker (no external imports)
+// Import TensorFlow.js with latest stable version
+importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js')
+
+let isInitialized = false
+
+// Worker logger with debug always enabled
 const logger = {
-  debug: (message, ...args) => console.debug(`[CloakingWorker] ${message}`, ...args),
+  debug: (message, ...args) => console.log(`[CloakingWorker] DEBUG: ${message}`, ...args),
   info: (message, ...args) => console.info(`[CloakingWorker] ${message}`, ...args),
   warn: (message, ...args) => console.warn(`[CloakingWorker] ${message}`, ...args),
   error: (message, ...args) => console.error(`[CloakingWorker] ${message}`, ...args)
 }
 
-// Self-contained cloaking implementation for worker
-class WorkerFaceDetector {
-  constructor() {
-    this.features = [
-      { type: 'horizontal', x: 0.2, y: 0.3, w: 0.6, h: 0.2, weight: 1.2 },
-      { type: 'vertical', x: 0.4, y: 0.4, w: 0.2, h: 0.3, weight: 0.8 },
-      { type: 'horizontal', x: 0.3, y: 0.65, w: 0.4, h: 0.15, weight: 1.0 }
-    ]
-  }
-
-  async detectFaces(imageData, options = {}) {
-    const { maxFaces = 3, minSize = 48 } = options
-    const { data, width, height } = imageData
-    
-    const grayscale = this.rgbaToGrayscale(data, width, height)
-    const faces = []
-    const step = Math.max(8, Math.floor(minSize * 0.3))
-    
-    for (let y = 0; y < height - minSize; y += step) {
-      for (let x = 0; x < width - minSize; x += step) {
-        const confidence = this.quickFaceScore(grayscale, width, x, y, minSize)
-        if (confidence > 0.6) {
-          faces.push({ x, y, width: minSize, height: minSize, confidence })
-        }
-      }
-      if (y % (step * 6) === 0) await this.yieldControl()
-    }
-    
-    return this.simpleNMS(faces, 0.4).slice(0, maxFaces)
-  }
-
-  rgbaToGrayscale(data, width, height) {
-    const grayscale = new Float32Array(width * height)
-    for (let i = 0; i < width * height; i++) {
-      const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2]
-      grayscale[i] = (r * 0.299 + g * 0.587 + b * 0.114) / 255.0
-    }
-    return grayscale
-  }
-
-  quickFaceScore(grayscale, width, x, y, size) {
-    let score = 0
-    for (const feature of this.features) {
-      const fx = Math.floor(x + feature.x * size)
-      const fy = Math.floor(y + feature.y * size)
-      const fw = Math.floor(feature.w * size)
-      const fh = Math.floor(feature.h * size)
-      
-      let sum1 = 0, sum2 = 0, count1 = 0, count2 = 0
-      
-      for (let dy = 0; dy < fh; dy += 2) {
-        for (let dx = 0; dx < fw; dx += 2) {
-          const px = fx + dx, py = fy + dy
-          if (px < width && py < grayscale.length / width) {
-            const value = grayscale[py * width + px]
-            if (feature.type === 'horizontal') {
-              if (dy < fh / 2) { sum1 += value; count1++ }
-              else { sum2 += value; count2++ }
-            } else {
-              if (dx < fw / 2) { sum1 += value; count1++ }
-              else { sum2 += value; count2++ }
-            }
-          }
-        }
-      }
-      
-      const avg1 = count1 > 0 ? sum1 / count1 : 0
-      const avg2 = count2 > 0 ? sum2 / count2 : 0
-      score += Math.abs(avg1 - avg2) * feature.weight
-    }
-    return Math.min(1.0, score / this.features.length)
-  }
-
-  simpleNMS(faces, threshold) {
-    if (!faces.length) return []
-    faces.sort((a, b) => b.confidence - a.confidence)
-    const keep = [faces[0]]
-    
-    for (let i = 1; i < faces.length; i++) {
-      let suppress = false
-      for (const kept of keep) {
-        if (this.calculateOverlap(faces[i], kept) > threshold) {
-          suppress = true
-          break
-        }
-      }
-      if (!suppress && keep.length < 4) keep.push(faces[i])
-    }
-    return keep
-  }
-
-  calculateOverlap(rect1, rect2) {
-    const x1 = Math.max(rect1.x, rect2.x)
-    const y1 = Math.max(rect1.y, rect2.y)
-    const x2 = Math.min(rect1.x + rect1.width, rect2.x + rect2.width)
-    const y2 = Math.min(rect1.y + rect1.height, rect2.y + rect2.height)
-    
-    if (x2 <= x1 || y2 <= y1) return 0
-    const intersection = (x2 - x1) * (y2 - y1)
-    const union = rect1.width * rect1.height + rect2.width * rect2.height - intersection
-    return intersection / union
-  }
-
-  async yieldControl() {
-    return new Promise(resolve => setTimeout(resolve, 0))
+// Memory management utilities
+function logMemoryUsage(context = '') {
+  const memInfo = tf.memory()
+  const memoryMB = memInfo.numBytes / 1024 / 1024
+  if (memoryMB > 200) { // Log if > 200MB (lower threshold)
+    logger.warn(`${context} Memory usage: ${memoryMB.toFixed(2)} MB (${memInfo.numTensors} tensors)`)
   }
 }
 
-class WorkerVisionModel {
-  constructor() {
-    this.filters = Array.from({ length: 16 }, () => ({
-      weights: new Float32Array(9).map(() => (Math.random() - 0.5) * 0.4),
-      bias: (Math.random() - 0.5) * 0.2
-    }))
-  }
-
-  async computeGradients(imageData) {
-    const { data, width, height } = imageData
-    const gradients = new Float32Array(data.length)
-    const chunkSize = Math.min(2000, Math.floor(data.length / 6))
-    
-    for (let start = 0; start < data.length; start += chunkSize) {
-      const end = Math.min(start + chunkSize, data.length)
-      
-      for (let i = start; i < end; i += 4) {
-        if (i + 3 < data.length) {
-          const pixelIdx = Math.floor(i / 4)
-          const x = pixelIdx % width
-          const y = Math.floor(pixelIdx / width)
-          const baseGrad = this.computePixelGradient(data, x, y, width, height)
-          
-          gradients[i] = baseGrad * 0.299
-          gradients[i + 1] = baseGrad * 0.587
-          gradients[i + 2] = baseGrad * 0.114
-          gradients[i + 3] = 0
-        }
-      }
-      
-      if (start % (chunkSize * 2) === 0) {
-        await new Promise(resolve => setTimeout(resolve, 0))
-      }
-    }
-    return gradients
-  }
-
-  computePixelGradient(data, x, y, width, height) {
-    let response = 0
-    for (let f = 0; f < Math.min(4, this.filters.length); f++) {
-      const filter = this.filters[f]
-      let conv = 0
-      
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx, ny = y + dy
-          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-            const idx = (ny * width + nx) * 4
-            const gray = (data[idx] + data[idx + 1] + data[idx + 2]) / (3 * 255)
-            conv += gray * filter.weights[(dy + 1) * 3 + (dx + 1)]
-          }
-        }
-      }
-      response += Math.tanh(conv + filter.bias)
-    }
-    return response / 4
-  }
-}
-
-// Image utilities for worker
-function getImageDataFromDataURL(dataURL) {
-  return new Promise((resolve, reject) => {
-    if (!dataURL || typeof dataURL !== 'string') {
-      reject(new Error('Invalid data URL'))
-      return
-    }
-
-    try {
-      if (typeof OffscreenCanvas !== 'undefined') {
-        // Modern approach with OffscreenCanvas
-        fetch(dataURL)
-          .then(response => response.blob())
-          .then(blob => createImageBitmap(blob))
-          .then(imageBitmap => {
-            const canvas = new OffscreenCanvas(imageBitmap.width, imageBitmap.height)
-            const ctx = canvas.getContext('2d')
-            ctx.drawImage(imageBitmap, 0, 0)
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-            resolve(imageData)
-          })
-          .catch(reject)
-      } else {
-        reject(new Error('OffscreenCanvas not supported'))
-      }
-    } catch (error) {
-      reject(error)
-    }
-  })
-}
-
-function imageDataToDataURL(imageData) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      if (typeof OffscreenCanvas !== 'undefined') {
-        const canvas = new OffscreenCanvas(imageData.width, imageData.height)
-        const ctx = canvas.getContext('2d')
-        ctx.putImageData(imageData, 0, 0)
-        
-        // Convert to blob with timeout
-        const blobPromise = canvas.convertToBlob({ type: 'image/png' })
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Canvas to blob conversion timeout')), 10000)
-        )
-        
-        const blob = await Promise.race([blobPromise, timeoutPromise])
-        
-        // Convert blob to data URL with timeout
-        const dataURLPromise = new Promise((resolve, reject) => {
-          const reader = new FileReader()
-          reader.onload = () => resolve(reader.result)
-          reader.onerror = () => reject(new Error('FileReader error'))
-          reader.readAsDataURL(blob)
-        })
-        
-        const timeoutPromise2 = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Blob to dataURL conversion timeout')), 5000)
-        )
-        
-        const dataURL = await Promise.race([dataURLPromise, timeoutPromise2])
-        resolve(dataURL)
-      } else {
-        reject(new Error('OffscreenCanvas not supported'))
-      }
-    } catch (error) {
-      logger.error('imageDataToDataURL error:', error)
-      reject(error)
-    }
-  })
-}
-
-// Core processing functions
-async function processImageWithFawkes(imageDataURL, protectionLevel, progressCallback) {
+function forceGarbageCollection() {
   try {
-    progressCallback?.(5)
-    const imageData = await getImageDataFromDataURL(imageDataURL)
-    progressCallback?.(15)
-
-    const faceDetector = new WorkerFaceDetector()
-    const faces = await faceDetector.detectFaces(imageData, { maxFaces: 3 })
-    progressCallback?.(35)
-
-    const model = new WorkerVisionModel()
-    const epsilon = { 'low': 0.03, 'mid': 0.05, 'high': 0.07 }[protectionLevel] || 0.05
-
-    const result = await applyFastAdversarialAttack(imageData, model, faces, epsilon, 8, progressCallback)
-    progressCallback?.(95)
-
-    const resultDataURL = await imageDataToDataURL(result)
-    progressCallback?.(100)
-
-    return resultDataURL
+    // Force cleanup of disposed tensors
+    tf.disposeVariables()
+    
+    // Manual WebGL context cleanup
+    if (tf.getBackend() === 'webgl') {
+      const backend = tf.backend()
+      if (backend && backend.gpgpu && backend.gpgpu.gl) {
+        backend.gpgpu.gl.finish()
+      }
+    }
+    
+    // Browser garbage collection if available
+    if (typeof gc !== 'undefined') {
+      gc()
+    }
+    
+    // Force a small delay to allow cleanup
+    return new Promise(resolve => setTimeout(resolve, 10))
   } catch (error) {
-    logger.error(`Fawkes processing failed: ${error.message}`)
-    throw new Error(`Fawkes processing failed: ${error.message}`)
+    logger.warn('Garbage collection error:', error)
   }
 }
 
-async function processImageWithAdvCloak(imageDataURL, epsilon, iterations, progressCallback) {
-  return new Promise(async (resolve, reject) => {
+// DRY Utilities for tensor processing
+function safeDispose(...tensors) {
+  tensors.forEach(tensor => {
     try {
-      // Add timeout for AdvCloak processing (10 minutes max)
-      const processingTimeout = setTimeout(() => {
-        reject(new Error('AdvCloak processing timeout in worker'))
-      }, 600000) // 10 minutes
+      if (tensor && typeof tensor.dispose === 'function' && !tensor.isDisposed) {
+        tensor.dispose()
+      }
+    } catch (error) {
+      logger.warn('Failed to dispose tensor:', error)
+    }
+  })
+}
+
+// Simplified backend check - don't interfere with active computations
+function isBackendReady() {
+  try {
+    return tf && tf.getBackend() && tf.backend()
+  } catch (error) {
+    return false
+  }
+}
+
+async function initializeWorker() {
+  if (isInitialized) return
+  
+  try {
+    logger.info('Initializing TensorFlow.js worker...')
+    
+    // Wait a bit for TensorFlow.js to fully load
+    await new Promise(resolve => setTimeout(resolve, 100))
+    
+    // Initialize TensorFlow.js - simple and safe
+    await tf.ready()
+    
+    // Use WebGL if available, CPU otherwise
+    try {
+      await tf.setBackend('webgl')
+      await tf.ready()
+      logger.info('Worker using WebGL backend')
+    } catch (webglError) {
+      logger.warn('WebGL failed, using CPU backend:', webglError)
+      await tf.setBackend('cpu')
+      await tf.ready()
+      logger.info('Worker using CPU backend')
+    }
+    
+    // Configure environment for stability
+    tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', -1) // Disable auto cleanup
+    tf.env().set('WEBGL_FORCE_F16_TEXTURES', false)
+    tf.env().set('WEBGL_PACK', false)
+    tf.env().set('WEBGL_CPU_FORWARD', false)
+    
+    // Simple test to ensure backend works
+    const testOp = tf.tidy(() => {
+      const a = tf.ones([2, 2])
+      const b = tf.ones([2, 2])
+      return tf.add(a, b)
+    })
+    
+    const testResult = testOp.dataSync()
+    if (testResult[0] !== 2.0) {
+      throw new Error('Backend test operation failed')
+    }
+    testOp.dispose()
+    
+    isInitialized = true
+    logger.info(`Worker initialized successfully with ${tf.getBackend()} backend`)
+    
+  } catch (error) {
+    logger.error('Worker initialization failed:', error)
+    isInitialized = false
+    throw new Error('Worker initialization failed: ' + error.message)
+  }
+}
+
+// FGSM Attack Implementation (matches main thread pattern)
+class WorkerFGSMAttack {
+  constructor(epsilon = 0.03) {
+    this.epsilon = epsilon
+  }
+  
+  createSurrogateModel(inputShape) {
+    try {
+      const [height, width, channels] = inputShape
+      const imageSize = height * width
       
-      const cleanup = () => clearTimeout(processingTimeout)
+      // Adaptive model architecture based on image size to prevent WebGL texture limits
+      let filters1, filters2, filters3, kernelSize1, kernelSize2
+      
+      if (imageSize > 2048 * 2048) {
+        // Large images: minimal model to avoid WebGL limits
+        filters1 = 8
+        filters2 = 16  
+        filters3 = 24
+        kernelSize1 = 3
+        kernelSize2 = 3
+        logger.info(`Worker: Using minimal surrogate model for large image: ${width}×${height}`)
+      } else if (imageSize > 1024 * 1024) {
+        // Medium images: reduced complexity
+        filters1 = 12
+        filters2 = 24
+        filters3 = 32
+        kernelSize1 = 3
+        kernelSize2 = 3
+      } else {
+        // Small images: full model
+        filters1 = 16
+        filters2 = 32
+        filters3 = 64
+        kernelSize1 = 5
+        kernelSize2 = 5
+      }
+      
+      const model = tf.sequential({
+        layers: [
+          tf.layers.conv2d({
+            filters: filters1,
+            kernelSize: kernelSize1,
+            activation: 'relu',
+            inputShape: inputShape,
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.maxPooling2d({ 
+            poolSize: 2,
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.conv2d({ 
+            filters: filters2, 
+            kernelSize: kernelSize2, 
+            activation: 'relu',
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.maxPooling2d({ 
+            poolSize: 2,
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.conv2d({ 
+            filters: filters3, 
+            kernelSize: 3, 
+            activation: 'relu',
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.globalAveragePooling2d({
+            dataFormat: 'channelsLast'
+          }),
+          tf.layers.dense({ units: Math.min(64, filters3), activation: 'relu' }),
+          tf.layers.dropout({ rate: 0.3 }), // Higher dropout for stability
+          tf.layers.dense({ units: 10, activation: 'softmax' })
+        ]
+      })
+      
+      // Use lightweight optimizer for large images
+      const optimizer = imageSize > 2048 * 2048 ? 'sgd' : 'adam'
+      
+      model.compile({
+        optimizer: optimizer,
+        loss: 'categoricalCrossentropy',
+        metrics: ['accuracy']
+      })
+      
+      logger.debug(`Worker surrogate model: ${filters1}-${filters2}-${filters3} filters, ${kernelSize1}×${kernelSize2} kernels`)
+      return model
+    } catch (error) {
+      logger.error('Worker: Failed to create surrogate model:', error)
+      throw new Error('Worker model creation failed: ' + error.message)
+    }
+  }
+
+  async generatePerturbation(imageTensor, targetClass = null) {
+    let model = null
+    let perturbation = null
+    
+    try {
+      // Create model fresh each time - match main thread pattern exactly
+      model = this.createSurrogateModel(imageTensor.shape.slice(1))
+      
+      // Create gradient function that computes loss w.r.t input
+      const lossGradFn = tf.grad(input => {
+        const pred = model.predict(input)
+        if (targetClass !== null) {
+          const target = tf.oneHot(targetClass, pred.shape[1])
+          return tf.neg(tf.losses.softmaxCrossEntropy(target, pred))
+        } else {
+          const trueClass = tf.argMax(pred, 1)
+          const target = tf.oneHot(trueClass, pred.shape[1])
+          return tf.losses.softmaxCrossEntropy(target, pred)
+        }
+      })
+      
+      // Calculate gradients with respect to input tensor
+      const gradients = lossGradFn(imageTensor)
+      
+      // Sign of gradients
+      const signGradients = tf.sign(gradients)
+      
+      // Apply epsilon scaling
+      perturbation = tf.mul(signGradients, this.epsilon)
+      
+      // Cleanup intermediate tensors
+      gradients.dispose()
+      signGradients.dispose()
+      
+      return perturbation
+      
+    } catch (error) {
+      logger.error(`Worker FGSM perturbation generation failed: ${error.message}`)
+      
+      // Cleanup on error
+      if (model) model.dispose()
+      if (perturbation) perturbation.dispose()
+      
+      throw error
+    } finally {
+      if (model) model.dispose()
+    }
+  }
+}
+
+// Iterative FGSM Attack (matches main thread pattern)
+class WorkerIterativeFGSMAttack extends WorkerFGSMAttack {
+  constructor(epsilon = 0.03, iterations = 10, stepSize = 0.007) {
+    super(epsilon)
+    this.iterations = iterations
+    this.stepSize = stepSize
+  }
+  
+  async generatePerturbation(imageTensor, targetClass = null, progressCallback = null) {
+    const model = this.createSurrogateModel(imageTensor.shape.slice(1))
+    
+    let adversarialImage = tf.clone(imageTensor)
+    
+    // Create gradient function once outside the loop
+    const lossGradFn = tf.grad(input => {
+      const pred = model.predict(input)
+      if (targetClass !== null) {
+        const target = tf.oneHot(targetClass, pred.shape[1])
+        return tf.neg(tf.losses.softmaxCrossEntropy(target, pred))
+      } else {
+        const trueClass = tf.argMax(pred, 1)
+        const target = tf.oneHot(trueClass, pred.shape[1])
+        return tf.losses.softmaxCrossEntropy(target, pred)
+      }
+    })
+    
+    // Async iteration with throttling and memory management - match main thread exactly
+    for (let i = 0; i < this.iterations; i++) {
+      const iterationStart = performance.now()
+      const prevAdversarial = adversarialImage
       
       try {
-        progressCallback?.(5)
-        const imageData = await getImageDataFromDataURL(imageDataURL)
-        progressCallback?.(15)
-
-        const model = new WorkerVisionModel()
-        const result = await applyFastGlobalAttack(imageData, model, epsilon, iterations, progressCallback)
-        progressCallback?.(95)
-
-        const resultDataURL = await imageDataToDataURL(result)
-        progressCallback?.(100)
-
-        cleanup()
-        resolve(resultDataURL)
+        // Perform one iteration of gradient computation
+        const newAdversarial = tf.tidy(() => {
+          const gradients = lossGradFn(adversarialImage)
+          const signGradients = tf.sign(gradients)
+          const step = tf.mul(signGradients, this.stepSize)
+          
+          const tentativeAdversarial = tf.add(adversarialImage, step)
+          
+          // Clip to epsilon-ball around original image
+          const perturbation = tf.sub(tentativeAdversarial, imageTensor)
+          const clippedPerturbation = tf.clipByValue(perturbation, -this.epsilon, this.epsilon)
+          const clippedAdversarial = tf.add(imageTensor, clippedPerturbation)
+          
+          // Clip to valid pixel range [-1, 1]
+          return tf.clipByValue(clippedAdversarial, -1, 1)
+        })
+        
+        // Dispose previous iteration's result (except first iteration)
+        if (i > 0) {
+          prevAdversarial.dispose()
+        }
+        
+        adversarialImage = newAdversarial
+        
+        // Update progress
+        if (progressCallback) {
+          progressCallback((i + 1) / this.iterations)
+        }
+        
+        // Memory management and yielding - less aggressive than before
+        if (i % 5 === 0) { // Every 5 iterations instead of 3
+          // Check memory usage
+          const memInfo = tf.memory()
+          if (memInfo.numBytes > 800 * 1024 * 1024) { // > 800MB instead of 500MB
+            logger.warn(`Worker high memory usage: ${Math.round(memInfo.numBytes / 1024 / 1024)}MB, forcing cleanup`)
+            // Don't use tf.dispose() which can corrupt active tensors
+            await forceGarbageCollection()
+          }
+        }
+        
+        // Yield control if needed - simpler check
+        const processingTime = performance.now() - iterationStart
+        if (i % 3 === 0 || processingTime > 16) { // Every 3 iterations or if > 16ms (one frame)
+          await new Promise(resolve => setTimeout(resolve, 1)) // Minimal yield
+        }
+        
       } catch (error) {
-        cleanup()
+        // Cleanup on iteration error
+        if (i > 0 && prevAdversarial) {
+          prevAdversarial.dispose()
+        }
+        
+        // Don't try fallbacks in worker - just fail and let main thread handle
+        logger.error(`Worker iteration ${i + 1} failed: ${error.message}`)
         throw error
       }
-    } catch (error) {
-      logger.error(`AdvCloak processing failed: ${error.message}`)
-      reject(new Error(`AdvCloak processing failed: ${error.message}`))
     }
-  })
-}
-
-async function applyFastAdversarialAttack(imageData, model, faces, epsilon, iterations, progressCallback) {
-  const { data, width, height } = imageData
-  const newData = new Uint8ClampedArray(data)
-
-  // Face-focused perturbations
-  for (let i = 0; i < faces.length; i++) {
-    await applyFacePerturbations(newData, data, faces[i], epsilon * 1.5, width, height)
-    progressCallback?.(40 + (i / faces.length) * 30)
-  }
-
-  // Global perturbations
-  await applyFastGlobalPerturbations(newData, data, model, epsilon * 0.7, iterations, width, height, progressCallback)
-
-  return new ImageData(newData, width, height)
-}
-
-async function applyFastGlobalAttack(imageData, model, epsilon, iterations, progressCallback) {
-  const { data, width, height } = imageData
-  const newData = new Uint8ClampedArray(data)
-  
-  await applyFastGlobalPerturbations(newData, data, model, epsilon, iterations, width, height, progressCallback)
-  
-  return new ImageData(newData, width, height)
-}
-
-async function applyFacePerturbations(newData, originalData, face, epsilon, width, height) {
-  const { x, y, width: faceWidth, height: faceHeight } = face
-  const patterns = [
-    { region: [0.2, 0.3, 0.6, 0.2], strength: 1.2 },
-    { region: [0.4, 0.4, 0.2, 0.3], strength: 0.8 },
-    { region: [0.3, 0.65, 0.4, 0.15], strength: 1.0 }
-  ]
-
-  for (const pattern of patterns) {
-    const [rx, ry, rw, rh] = pattern.region
-    const regionX = Math.floor(x + faceWidth * rx)
-    const regionY = Math.floor(y + faceHeight * ry)
-    const regionW = Math.floor(faceWidth * rw)
-    const regionH = Math.floor(faceHeight * rh)
-
-    for (let dy = 0; dy < regionH; dy += 2) {
-      for (let dx = 0; dx < regionW; dx += 2) {
-        const px = regionX + dx, py = regionY + dy
-        if (px < width && py < height) {
-          const idx = (py * width + px) * 4
-          const noise = (Math.sin(dx * 0.3) * Math.cos(dy * 0.3)) * epsilon * pattern.strength * 255
-
-          for (let c = 0; c < 3; c++) {
-            const perturbedValue = originalData[idx + c] + noise
-            newData[idx + c] = Math.round(Math.max(0, Math.min(255, perturbedValue)))
-          }
-        }
-      }
-    }
+    
+    // Calculate final perturbation
+    const finalPerturbation = tf.sub(adversarialImage, imageTensor)
+    
+    // Cleanup
+    adversarialImage.dispose()
+    model.dispose()
+    
+    return finalPerturbation
   }
 }
 
-async function applyFastGlobalPerturbations(newData, originalData, model, epsilon, iterations, width, height, progressCallback) {
-  const alpha = epsilon / iterations
-  const totalPixels = width * height
-
-  for (let iter = 0; iter < iterations; iter++) {
-    const currentImageData = new ImageData(newData, width, height)
-    const gradients = await model.computeGradients(currentImageData)
-
-    const chunkSize = Math.min(4000, Math.floor(totalPixels / 8))
-
-    for (let start = 0; start < totalPixels; start += chunkSize) {
-      const end = Math.min(start + chunkSize, totalPixels)
-
-      for (let pixelIdx = start; pixelIdx < end; pixelIdx++) {
-        const dataIdx = pixelIdx * 4
-
-        for (let c = 0; c < 3; c++) {
-          const gradIdx = dataIdx + c
-          const grad = gradients[gradIdx]
-
-          const originalValue = originalData[dataIdx + c] / 255.0
-          let currentValue = newData[dataIdx + c] / 255.0
-
-          currentValue += alpha * Math.sign(grad)
-
-          const diff = currentValue - originalValue
-          if (Math.abs(diff) > epsilon) {
-            currentValue = originalValue + epsilon * Math.sign(diff)
-          }
-
-          newData[dataIdx + c] = Math.round(Math.max(0, Math.min(255, currentValue * 255)))
-        }
-      }
-
-      if (start % (chunkSize * 3) === 0) {
-        await new Promise(resolve => setTimeout(resolve, 0))
-      }
+// Utility functions for tensor/image conversion
+async function imageDataURLToTensor(dataURL) {
+  try {
+    // Convert data URL to blob
+    const response = await fetch(dataURL)
+    const blob = await response.blob()
+    
+    // Create ImageBitmap from blob (available in Web Workers)
+    const imageBitmap = await createImageBitmap(blob)
+    
+    const originalWidth = imageBitmap.width
+    const originalHeight = imageBitmap.height
+    
+    // More conservative limits to prevent conv2d intermediate tensor overflow
+    const maxDimension = 2048 // Reduced to prevent conv2d texture overflow  
+    const maxPixels = 2048 * 2048 // Max 4MP to prevent memory issues
+    
+    let finalWidth = originalWidth
+    let finalHeight = originalHeight
+    
+    // Check if resizing is needed to prevent WebGL texture overflow
+    const totalPixels = originalWidth * originalHeight
+    if (originalWidth > maxDimension || originalHeight > maxDimension || totalPixels > maxPixels) {
+      // Calculate scale to fit both dimension and pixel constraints
+      const dimensionScale = Math.min(maxDimension / originalWidth, maxDimension / originalHeight)
+      const pixelScale = Math.sqrt(maxPixels / totalPixels)
+      const scale = Math.min(dimensionScale, pixelScale)
+      
+      finalWidth = Math.round(originalWidth * scale)
+      finalHeight = Math.round(originalHeight * scale)
+      
+      logger.info(`Worker: Resizing image from ${originalWidth}×${originalHeight} to ${finalWidth}×${finalHeight} to prevent WebGL texture overflow`)
     }
-
-    if (progressCallback) {
-      const progress = 70 + ((iter + 1) / iterations) * 25
-      progressCallback(progress)
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 0))
+    
+    // Use OffscreenCanvas with final dimensions
+    const canvas = new OffscreenCanvas(finalWidth, finalHeight)
+    const ctx = canvas.getContext('2d')
+    
+    // Draw with resizing if necessary
+    ctx.drawImage(imageBitmap, 0, 0, originalWidth, originalHeight, 0, 0, finalWidth, finalHeight)
+    
+    const imageData = ctx.getImageData(0, 0, finalWidth, finalHeight)
+    
+    // Convert to tensor with proper normalization
+    const tensor = tf.browser.fromPixels(imageData)
+      .expandDims(0)
+      .div(255.0)
+      .sub(0.5)
+      .mul(2.0)
+    
+    // Clean up ImageBitmap
+    imageBitmap.close()
+    
+    logger.debug(`Created tensor with shape: ${tensor.shape}`)
+    return tensor
+  } catch (error) {
+    throw new Error(`Failed to convert image to tensor: ${error.message}`)
   }
 }
 
-// Worker message handler
-self.onmessage = async function(e) {
-  const { type, data, taskId } = e.data
-  const startTime = Date.now()
+// Fallback method: Manual pixel extraction and canvas drawing
+async function tensorToImageDataURLFallback(tensor) {
+  let squeezed = null
+  let normalized = null
   
   try {
-    self.postMessage({ type: 'STATUS', taskId, status: 'Worker processing started...' })
-
-    let result
-    switch (type) {
-      case 'PROCESS_FAWKES':
-        result = await processWithFawkes(data, taskId, startTime)
-        break
-      case 'PROCESS_ADVCLOAK':
-        result = await processWithAdvCloak(data, taskId, startTime)
-        break
-      case 'PROCESS_BOTH':
-        result = await processWithBoth(data, taskId, startTime)
-        break
-      case 'HEALTH_CHECK':
-        self.postMessage({ type: 'WORKER_READY', taskId })
-        return
-      default:
-        throw new Error(`Unknown task type: ${type}`)
+    logger.debug('Using fallback tensor to image conversion')
+    
+    // Remove batch dimension if present
+    squeezed = tensor.rank === 4 ? tensor.squeeze([0]) : tensor.squeeze()
+    const [height, width, channels] = squeezed.shape
+    
+    // Convert [-1, 1] to [0, 255] for ImageData
+    normalized = squeezed.add(1).div(2).mul(255).clipByValue(0, 255)
+    
+    // Get pixel data
+    const pixelData = await normalized.data()
+    
+    // Create ImageData
+    const imageData = new ImageData(width, height)
+    const data = imageData.data
+    
+    // Fill ImageData (convert RGB to RGBA)
+    for (let i = 0; i < height * width; i++) {
+      const pixelIndex = i * 4
+      const tensorIndex = i * channels
+      
+      if (channels === 3) {
+        data[pixelIndex] = pixelData[tensorIndex]     // R
+        data[pixelIndex + 1] = pixelData[tensorIndex + 1] // G
+        data[pixelIndex + 2] = pixelData[tensorIndex + 2] // B
+        data[pixelIndex + 3] = 255 // A
+      } else {
+        // Grayscale
+        const gray = pixelData[tensorIndex]
+        data[pixelIndex] = gray     // R
+        data[pixelIndex + 1] = gray // G
+        data[pixelIndex + 2] = gray // B
+        data[pixelIndex + 3] = 255  // A
+      }
     }
+    
+    // Limit image size in fallback too (match main method)
+    const maxDimension = 1600
+    let finalWidth = width
+    let finalHeight = height
+    
+    if (width > maxDimension || height > maxDimension) {
+      const scale = Math.min(maxDimension / width, maxDimension / height)
+      finalWidth = Math.round(width * scale)
+      finalHeight = Math.round(height * scale)
+      
+      // Resize ImageData
+      const tempCanvas = new OffscreenCanvas(width, height)
+      const tempCtx = tempCanvas.getContext('2d')
+      tempCtx.putImageData(imageData, 0, 0)
+      
+      const resizedCanvas = new OffscreenCanvas(finalWidth, finalHeight)
+      const resizedCtx = resizedCanvas.getContext('2d')
+      resizedCtx.drawImage(tempCanvas, 0, 0, width, height, 0, 0, finalWidth, finalHeight)
+      
+      imageData = resizedCtx.getImageData(0, 0, finalWidth, finalHeight)
+    }
+    
+    // Create canvas and draw ImageData
+    const canvas = new OffscreenCanvas(finalWidth, finalHeight)
+    const ctx = canvas.getContext('2d')
+    ctx.putImageData(imageData, 0, 0)
+    
+    // Use same adaptive compression logic as main method
+    const targetMaxSize = 4 * 1024 * 1024 // 4MB target max
+    let quality = 0.95
+    let blob = await canvas.convertToBlob({ 
+      type: 'image/jpeg', 
+      quality: quality
+    })
+    
+    // Iteratively reduce quality if file is too large
+    while (blob.size > targetMaxSize && quality > 0.70) {
+      quality -= 0.05
+      blob = await canvas.convertToBlob({ 
+        type: 'image/jpeg', 
+        quality: quality
+      })
+    }
+    
+    // Ensure minimum quality
+    if (quality < 0.70) {
+      blob = await canvas.convertToBlob({ 
+        type: 'image/jpeg', 
+        quality: 0.75
+      })
+    }
+    
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => reject(new Error('Failed to read blob as data URL'))
+      reader.readAsDataURL(blob)
+    })
+    
+  } finally {
+    safeDispose(squeezed, normalized)
+  }
+}
 
+async function tensorToImageDataURL(tensor) {
+  let squeezed = null
+  let normalized = null
+  
+  try {
+    logger.debug('Converting tensor to image, input shape:', tensor.shape)
+    
+    // Remove batch dimension if present
+    squeezed = tensor.rank === 4 ? tensor.squeeze([0]) : tensor.squeeze()
+    logger.debug('Squeezed tensor shape:', squeezed.shape)
+    
+    // Ensure we have a 3D tensor [height, width, channels]
+    if (squeezed.rank !== 3) {
+      throw new Error(`Expected 3D tensor, got ${squeezed.rank}D. Shape: ${squeezed.shape}`)
+    }
+    
+    const [height, width, channels] = squeezed.shape
+    logger.debug(`Image dimensions: ${width}x${height}x${channels}`)
+    
+    if (channels !== 3 && channels !== 1) {
+      throw new Error(`Expected 1 or 3 channels, got ${channels}`)
+    }
+    
+    // Convert [-1, 1] to [0, 1] for tf.browser.toPixels
+    normalized = squeezed.add(1).div(2).clipByValue(0, 1)
+    
+    // Debug: Check value range
+    const minVal = await normalized.min().data()
+    const maxVal = await normalized.max().data()
+    logger.debug(`Normalized value range: [${minVal[0].toFixed(3)}, ${maxVal[0].toFixed(3)}]`)
+    
+    // Reasonable size limits for good quality while keeping files manageable
+    const maxDimension = 1600 // Increased for better quality
+    let finalWidth = width
+    let finalHeight = height
+    
+    if (width > maxDimension || height > maxDimension) {
+      const scale = Math.min(maxDimension / width, maxDimension / height)
+      finalWidth = Math.round(width * scale)
+      finalHeight = Math.round(height * scale)
+      logger.debug(`Resizing from ${width}x${height} to ${finalWidth}x${finalHeight}`)
+    }
+    
+    // Create canvas with limited dimensions
+    const canvas = new OffscreenCanvas(finalWidth, finalHeight)
+    logger.debug(`Created canvas: ${finalWidth}x${finalHeight}`)
+    
+    if (finalWidth !== width || finalHeight !== height) {
+      // Need to resize the tensor
+      const resized = tf.image.resizeBilinear(normalized, [finalHeight, finalWidth])
+      await tf.browser.toPixels(resized, canvas)
+      resized.dispose()
+    } else {
+      // Convert tensor to pixels - tf.browser.toPixels expects [0-1] range for float32
+      await tf.browser.toPixels(normalized, canvas)
+    }
+    logger.debug('Tensor converted to canvas pixels')
+    
+    // Adaptive JPEG compression targeting 2-4MB files
+    const targetMaxSize = 4 * 1024 * 1024 // 4MB target max
+    const targetMinSize = 1.5 * 1024 * 1024 // 1.5MB target min
+    
+    // Start with high quality and adjust down if needed
+    let quality = 0.95
+    let blob = await canvas.convertToBlob({ 
+      type: 'image/jpeg', 
+      quality: quality
+    })
+    
+    logger.debug(`Initial blob size: ${(blob.size / 1024 / 1024).toFixed(2)}MB at ${Math.round(quality * 100)}% quality`)
+    
+    // Iteratively reduce quality if file is too large
+    while (blob.size > targetMaxSize && quality > 0.70) {
+      quality -= 0.05
+      blob = await canvas.convertToBlob({ 
+        type: 'image/jpeg', 
+        quality: quality
+      })
+      logger.debug(`Adjusted to ${(blob.size / 1024 / 1024).toFixed(2)}MB at ${Math.round(quality * 100)}% quality`)
+    }
+    
+    // Final check for minimum quality threshold
+    if (quality < 0.70) {
+      logger.warn('Quality dropped below 70%, using minimum acceptable quality')
+      blob = await canvas.convertToBlob({ 
+        type: 'image/jpeg', 
+        quality: 0.75 // Don't go below 75% for acceptable quality
+      })
+    }
+    
+    if (blob.size === 0) {
+      throw new Error('Generated blob is empty')
+    }
+    
+    logger.debug(`Final optimized size: ${(blob.size / 1024 / 1024).toFixed(2)}MB at ${Math.round(quality * 100)}% quality`)
+    
+    // Convert blob to data URL
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = reader.result
+        logger.debug(`Generated data URL, length: ${result.length}`)
+        
+        // Validate data URL size (should be reasonable after compression)
+        const maxDataURLSize = 8 * 1024 * 1024 // 8MB (data URLs are ~33% larger than blobs)
+        if (result.length > maxDataURLSize) {
+          logger.warn(`Data URL size: ${(result.length / 1024 / 1024).toFixed(2)}MB exceeds target but proceeding`)
+          // Don't reject - just warn and proceed since we already compressed
+        }
+        
+        // Ensure data URL is valid
+        if (!result.startsWith('data:image/')) {
+          reject(new Error('Invalid data URL format'))
+          return
+        }
+        
+        resolve(result)
+      }
+      reader.onerror = () => reject(new Error('Failed to read blob as data URL'))
+      reader.readAsDataURL(blob)
+    })
+    
+  } catch (error) {
+    logger.warn('Primary tensor conversion failed, trying fallback:', error.message)
+    
+    // Try fallback method
+    try {
+      return await tensorToImageDataURLFallback(tensor)
+    } catch (fallbackError) {
+      logger.error('Both primary and fallback conversion failed:', fallbackError)
+      throw new Error(`Failed to convert tensor to image: ${error.message}. Fallback also failed: ${fallbackError.message}`)
+    }
+  } finally {
+    // Always cleanup tensors
+    safeDispose(squeezed, normalized)
+  }
+}
+
+// DRY: Shared processing utilities
+function createProgressUpdater(taskId) {
+  return (progress, status = null) => {
     self.postMessage({
-      type: 'COMPLETE',
+      type: 'progress',
+      taskId,
+      progress: progress * 100,
+      ...(status && { status })
+    })
+  }
+}
+
+function createProcessingResult(processedDataURL, faces, epsilon, iterations, protectionLevel) {
+  return {
+    processedDataURL,
+    facesDetected: faces?.length || 0,
+    epsilon,
+    iterations,
+    protectionLevel
+  }
+}
+
+// Processing functions - now receive face data from main thread
+async function processWithFawkes(data, taskId) {
+  const { imageDataURL, fawkesEpsilon, faces } = data
+  const progressUpdate = createProgressUpdater(taskId)
+  let imageTensor, perturbation, adversarialTensor, clampedTensor
+  
+  try {
+    progressUpdate(0.05)
+    
+    // Simple backend check
+    if (!isBackendReady()) {
+      throw new Error('Worker backend not ready for Fawkes processing')
+    }
+    
+    progressUpdate(0.1)
+    logMemoryUsage('Start Fawkes')
+    
+    // Convert image to tensor
+    imageTensor = await imageDataURLToTensor(imageDataURL)
+    progressUpdate(0.3)
+    logMemoryUsage('Image converted')
+    
+    // Apply FGSM attack (model created fresh inside)
+    const attack = new WorkerFGSMAttack(fawkesEpsilon)
+    perturbation = await attack.generatePerturbation(imageTensor)
+    progressUpdate(0.7)
+    logMemoryUsage('Perturbation generated')
+    
+    // Apply perturbation
+    adversarialTensor = tf.add(imageTensor, perturbation)
+    clampedTensor = tf.clipByValue(adversarialTensor, -1, 1)
+    progressUpdate(0.9)
+    
+    // Debug: Check final tensor before conversion
+    logger.debug('Final tensor shape before conversion:', clampedTensor.shape)
+    const finalMin = await clampedTensor.min().data()
+    const finalMax = await clampedTensor.max().data()
+    logger.debug(`Final tensor value range: [${finalMin[0].toFixed(3)}, ${finalMax[0].toFixed(3)}]`)
+    
+    // Convert back to image
+    const resultDataURL = await tensorToImageDataURL(clampedTensor)
+    
+    // Verify result
+    if (!resultDataURL || !resultDataURL.startsWith('data:image/')) {
+      throw new Error('Invalid image data URL generated')
+    }
+    logger.debug('Successfully generated result data URL')
+    
+    progressUpdate(1.0)
+    
+    // Cleanup all resources (no need to dispose attack class - model disposed internally)
+    safeDispose(imageTensor, perturbation, adversarialTensor, clampedTensor)
+    await forceGarbageCollection()
+    logMemoryUsage('Fawkes complete')
+    
+    const result = createProcessingResult(resultDataURL, faces, fawkesEpsilon, 1, 'medium')
+    logger.debug('Fawkes result created:', {
+      hasProcessedDataURL: !!result.processedDataURL,
+      processedDataURLLength: result.processedDataURL?.length,
+      processedDataURLPrefix: result.processedDataURL?.substring(0, 50)
+    })
+    return result
+    
+  } catch (error) {
+    // Cleanup on error
+    safeDispose(imageTensor, perturbation, adversarialTensor, clampedTensor)
+    await forceGarbageCollection()
+    
+    logger.error('Fawkes processing error:', error)
+    throw error
+  }
+}
+
+async function processWithAdvCloak(data, taskId) {
+  const { imageDataURL, advCloakEpsilon, advCloakIterations, faces } = data
+  const progressUpdate = createProgressUpdater(taskId)
+  let imageTensor, perturbation, adversarialTensor, clampedTensor
+  
+  try {
+    progressUpdate(0.05)
+    
+    // Simple backend check
+    if (!isBackendReady()) {
+      throw new Error('Worker backend not ready for AdvCloak processing')
+    }
+    
+    progressUpdate(0.1)
+    logMemoryUsage('Start AdvCloak')
+    
+    // Convert image to tensor
+    imageTensor = await imageDataURLToTensor(imageDataURL)
+    progressUpdate(0.2)
+    logMemoryUsage('Image converted')
+    
+    // Apply Iterative FGSM attack (model created fresh inside)
+    const attack = new WorkerIterativeFGSMAttack(
+      advCloakEpsilon, 
+      advCloakIterations, 
+      advCloakEpsilon / Math.max(advCloakIterations, 1) // Prevent division by zero
+    )
+    
+    perturbation = await attack.generatePerturbation(
+      imageTensor, 
+      null, 
+      (iterProgress) => progressUpdate(0.2 + iterProgress * 0.6)
+    )
+    
+    progressUpdate(0.8)
+    logMemoryUsage('Perturbation generated')
+    
+    // Apply perturbation
+    adversarialTensor = tf.add(imageTensor, perturbation)
+    clampedTensor = tf.clipByValue(adversarialTensor, -1, 1)
+    progressUpdate(0.9)
+    
+    // Debug: Check final tensor before conversion
+    logger.debug('Final tensor shape before conversion:', clampedTensor.shape)
+    const finalMin = await clampedTensor.min().data()
+    const finalMax = await clampedTensor.max().data()
+    logger.debug(`Final tensor value range: [${finalMin[0].toFixed(3)}, ${finalMax[0].toFixed(3)}]`)
+    
+    // Convert back to image
+    const resultDataURL = await tensorToImageDataURL(clampedTensor)
+    
+    // Verify result
+    if (!resultDataURL || !resultDataURL.startsWith('data:image/')) {
+      throw new Error('Invalid image data URL generated')
+    }
+    logger.debug('Successfully generated result data URL')
+    
+    progressUpdate(1.0)
+    
+    // Cleanup all resources (no need to dispose attack class - model disposed internally)
+    safeDispose(imageTensor, perturbation, adversarialTensor, clampedTensor)
+    await forceGarbageCollection()
+    logMemoryUsage('AdvCloak complete')
+    
+    return createProcessingResult(resultDataURL, faces, advCloakEpsilon, advCloakIterations, 'high')
+    
+  } catch (error) {
+    // Cleanup on error
+    safeDispose(imageTensor, perturbation, adversarialTensor, clampedTensor)
+    await forceGarbageCollection()
+    
+    logger.error('AdvCloak processing error:', error)
+    throw error
+  }
+}
+
+async function processWithBoth(data, taskId) {
+  const { imageDataURL, fawkesEpsilon, advCloakEpsilon, advCloakIterations, faces } = data
+  
+  try {
+    // Step 1: Fawkes
+    self.postMessage({
+      type: 'progress',
+      taskId,
+      progress: 0,
+      status: 'Applying Fawkes protection...'
+    })
+    
+    const fawkesResult = await processWithFawkes({
+      imageDataURL,
+      fawkesEpsilon,
+      faces
+    }, taskId)
+    
+    // Step 2: AdvCloak on Fawkes result
+    self.postMessage({
+      type: 'progress',
+      taskId,
+      progress: 50,
+      status: 'Applying AdvCloak protection...'
+    })
+    
+    const finalResult = await processWithAdvCloak({
+      imageDataURL: fawkesResult.processedDataURL,
+      advCloakEpsilon,
+      advCloakIterations,
+      faces
+    }, taskId)
+    
+    return {
+      ...finalResult,
+      protectionLevel: 'maximum'
+    }
+    
+  } catch (error) {
+    logger.error('Combined processing error:', error)
+    throw error
+  }
+}
+
+// Message handler
+self.onmessage = async function(e) {
+  const { type, taskId, data } = e.data
+  
+  try {
+    if (type === 'init') {
+      await initializeWorker()
+      self.postMessage({ type: 'initialized', taskId })
+      return
+    }
+    
+    if (!isInitialized) {
+      throw new Error('Worker not initialized')
+    }
+    
+    // Simple backend check before processing
+    if (!isBackendReady()) {
+      throw new Error('Worker backend not ready for processing')
+    }
+    
+    let result
+    
+    switch (type) {
+      case 'fawkes':
+        result = await processWithFawkes(data, taskId)
+        break
+      case 'advcloak':
+        result = await processWithAdvCloak(data, taskId)
+        break
+      case 'both':
+        result = await processWithBoth(data, taskId)
+        break
+      default:
+        throw new Error(`Unknown processing type: ${type}`)
+    }
+    
+    logger.debug('Sending result to main thread:', {
+      taskId,
+      resultKeys: Object.keys(result),
+      hasProcessedDataURL: !!result.processedDataURL,
+      processedDataURLLength: result.processedDataURL?.length
+    })
+    
+    self.postMessage({
+      type: 'result',
       taskId,
       result
     })
+    
   } catch (error) {
-    logger.error('Worker error:', error)
+    logger.error('Worker processing error:', error)
     self.postMessage({
-      type: 'WORKER_ERROR',
+      type: 'error',
       taskId,
       error: error.message
     })
   }
 }
 
-async function processWithFawkes(data, taskId, startTime) {
-  const { imageDataURL, protectionLevel } = data
-  
-  const progressCallback = (progress) => {
-    self.postMessage({ type: 'PROGRESS', taskId, progress })
-  }
-
-  const result = await processImageWithFawkes(imageDataURL, protectionLevel, progressCallback)
-  
-  return {
-    imageDataURL: result,
-    method: 'fawkes',
-    processingTime: Date.now() - startTime
-  }
+// Handle worker errors
+self.onerror = function(error) {
+  logger.error('Worker global error:', error)
 }
 
-async function processWithAdvCloak(data, taskId, startTime) {
-  const { imageDataURL, epsilon, iterations } = data
-  
-  const progressCallback = (progress) => {
-    self.postMessage({ type: 'PROGRESS', taskId, progress })
-  }
-
-  const safeEpsilon = Math.min(epsilon || 0.05, 0.08)
-  const safeIterations = Math.min(iterations || 15, 20)
-
-  const result = await processImageWithAdvCloak(imageDataURL, safeEpsilon, safeIterations, progressCallback)
-  
-  return {
-    imageDataURL: result,
-    method: 'advcloak',
-    processingTime: Date.now() - startTime
-  }
-}
-
-async function processWithBoth(data, taskId, startTime) {
-  const { imageDataURL, fawkesLevel, advCloakEpsilon, advCloakIterations } = data
-  
-  const progressCallback = (progress) => {
-    self.postMessage({ type: 'PROGRESS', taskId, progress })
-  }
-
-  // Step 1: Fawkes
-  self.postMessage({ type: 'STATUS', taskId, status: 'Step 1/2: Applying Fawkes protection...' })
-  const fawkesResult = await processImageWithFawkes(
-    imageDataURL, 
-    fawkesLevel,
-    (p) => progressCallback(p * 0.5)
-  )
-
-  // Step 2: AdvCloak
-  self.postMessage({ type: 'STATUS', taskId, status: 'Step 2/2: Applying AdvCloak protection...' })
-  const safeEpsilon = Math.min(advCloakEpsilon || 0.05, 0.06)
-  const safeIterations = Math.min(advCloakIterations || 12, 15)
-  
-  const finalResult = await processImageWithAdvCloak(
-    fawkesResult,
-    safeEpsilon,
-    safeIterations,
-    (p) => progressCallback(50 + p * 0.5)
-  )
-
-  return {
-    imageDataURL: finalResult,
-    method: 'both',
-    processingTime: Date.now() - startTime
-  }
-}
-
-// Worker cleanup and error recovery
-self.addEventListener('error', (error) => {
-  logger.error('Worker uncaught error:', error)
-  self.postMessage({
-    type: 'WORKER_ERROR',
-    error: error.message,
-    filename: error.filename,
-    lineno: error.lineno
-  })
-})
-
-self.addEventListener('unhandledrejection', (event) => {
-  logger.error('Worker unhandled promise rejection:', event.reason)
-  event.preventDefault()
-  self.postMessage({
-    type: 'WORKER_ERROR',
-    error: event.reason.message || 'Unhandled promise rejection',
-    stack: event.reason.stack
-  })
-})
-
-// Periodic memory cleanup (every 30 seconds)
-setInterval(() => {
-  if (self.gc && typeof self.gc === 'function') {
-    self.gc()
-  }
-}, 30000)
-
-// Worker initialization check
-self.postMessage({
-  type: 'WORKER_READY',
-  timestamp: Date.now()
-}) 
+self.onunhandledrejection = function(event) {
+  logger.error('Worker unhandled rejection:', event.reason)
+} 

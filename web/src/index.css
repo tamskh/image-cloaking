@@ -87,7 +87,12 @@
 
   /* Optimized scroll behavior */
   .scroll-mt-header {
-    scroll-margin-top: 4rem;
+    scroll-margin-top: 5rem; /* 80px - accounts for 64px header + 16px padding */
+  }
+
+  /* Additional scroll utilities for consistent header offset */
+  .scroll-pt-header {
+    scroll-padding-top: 5rem; /* 80px - ensures content doesn't hide behind header */
   }
 
   /* Performance optimizations */

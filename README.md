@@ -1,8 +1,18 @@
 ## **🎯 Product Vision & Market Positioning**
 
+### **⚠️ IMPORTANT DISCLAIMER**
+
+**This is experimental research technology with significant limitations:**
+- No guarantees of effectiveness against real AI systems
+- Many modern AI systems may not be affected at all  
+- Web implementation uses simplified algorithms compared to research versions
+- Results vary greatly and cannot be predicted or tested
+- **This is NOT a reliable security or privacy tool**
+- Use only for research, experimentation, and educational purposes
+
 * **Elevator pitch**
 
-   "A seamless privacy-dedicated image-processing tool – cloak your photos so AI models can't see them, while humans see the real you."
+   "An experimental image privacy research tool – applies research-based techniques that may interfere with some AI vision systems, with varying and unpredictable results."
 
 * **Target users**
 

@@ -8,33 +8,64 @@ const logger = createLogger('ImageUtils')
 
 // Convert data URL to blob for downloading
 export function dataURLToBlob(dataURL) {
-  const parts = dataURL.split(',')
-  const byteString = atob(parts[1])
-  const mimeString = parts[0].split(':')[1].split(';')[0]
-  
-  const arrayBuffer = new ArrayBuffer(byteString.length)
-  const uint8Array = new Uint8Array(arrayBuffer)
-  
-  for (let i = 0; i < byteString.length; i++) {
-    uint8Array[i] = byteString.charCodeAt(i)
+  // Validate input
+  if (!dataURL || typeof dataURL !== 'string') {
+    throw new Error('Invalid data URL: expected non-empty string')
   }
   
-  return new Blob([arrayBuffer], { type: mimeString })
+  if (!dataURL.startsWith('data:')) {
+    throw new Error('Invalid data URL: must start with "data:"')
+  }
+  
+  const parts = dataURL.split(',')
+  if (parts.length !== 2) {
+    throw new Error('Invalid data URL format')
+  }
+  
+  try {
+    const byteString = atob(parts[1])
+    const mimeString = parts[0].split(':')[1].split(';')[0]
+    
+    const arrayBuffer = new ArrayBuffer(byteString.length)
+    const uint8Array = new Uint8Array(arrayBuffer)
+    
+    for (let i = 0; i < byteString.length; i++) {
+      uint8Array[i] = byteString.charCodeAt(i)
+    }
+    
+    return new Blob([arrayBuffer], { type: mimeString })
+  } catch (error) {
+    throw new Error(`Failed to convert data URL to blob: ${error.message}`)
+  }
 }
 
 // Download image from data URL
 export function downloadImage(dataURL, filename) {
-  const blob = dataURLToBlob(dataURL)
-  const url = URL.createObjectURL(blob)
-  
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  
-  URL.revokeObjectURL(url)
+  try {
+    if (!dataURL) {
+      throw new Error('No image data available for download')
+    }
+    
+    logger.debug(`Attempting to download image, data URL length: ${dataURL.length}`)
+    
+    const blob = dataURLToBlob(dataURL)
+    const url = URL.createObjectURL(blob)
+    
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename || 'cloaked-image.png'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    URL.revokeObjectURL(url)
+    
+    logger.info(`Successfully downloaded image: ${filename}`)
+  } catch (error) {
+    logger.error('Failed to download image:', error)
+    // Show user-friendly error
+    alert(`Failed to download image: ${error.message}`)
+  }
 }
 
 // Get image data from data URL
@@ -182,18 +213,53 @@ export async function calculateImageMetrics(originalDataURL, processedDataURL) {
       getImageDataFromDataURL(processedDataURL)
     ])
     
-    // Ensure images have the same dimensions
+    let finalOriginalImageData = originalImageData
+    let finalProcessedImageData = processedImageData
+    
+    // If dimensions don't match, resize original to match processed
     if (originalImageData.width !== processedImageData.width || 
         originalImageData.height !== processedImageData.height) {
-      throw new Error('Images must have the same dimensions for comparison')
+      
+      logger.debug('Dimension mismatch - resizing original for comparison', {
+        original: `${originalImageData.width}x${originalImageData.height}`,
+        processed: `${processedImageData.width}x${processedImageData.height}`
+      })
+      
+      // Resize original to match processed dimensions
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      
+      canvas.width = processedImageData.width
+      canvas.height = processedImageData.height
+      
+      // Create temporary canvas for original
+      const tempCanvas = document.createElement('canvas')
+      const tempCtx = tempCanvas.getContext('2d')
+      tempCanvas.width = originalImageData.width
+      tempCanvas.height = originalImageData.height
+      tempCtx.putImageData(originalImageData, 0, 0)
+      
+      // Draw resized original
+      ctx.drawImage(tempCanvas, 0, 0, originalImageData.width, originalImageData.height, 
+                   0, 0, processedImageData.width, processedImageData.height)
+      
+      finalOriginalImageData = ctx.getImageData(0, 0, processedImageData.width, processedImageData.height)
     }
     
     const metrics = {
-      psnr: calculatePSNR(originalImageData, processedImageData),
-      ssim: calculateSSIM(originalImageData, processedImageData),
-      mse: calculateMSE(originalImageData, processedImageData),
-      perceptual_distance: calculatePerceptualDistance(originalImageData, processedImageData)
+      psnr: calculatePSNR(finalOriginalImageData, finalProcessedImageData),
+      ssim: calculateSSIM(finalOriginalImageData, finalProcessedImageData),
+      mse: calculateMSE(finalOriginalImageData, finalProcessedImageData),
+      perceptual_distance: calculatePerceptualDistance(finalOriginalImageData, finalProcessedImageData)
     }
+    
+    logger.debug('Quality metrics calculated:', {
+      psnr: metrics.psnr?.toFixed(2),
+      ssim: metrics.ssim?.toFixed(3), 
+      mse: metrics.mse?.toFixed(2),
+      perceptual_distance: metrics.perceptual_distance?.toFixed(2),
+      imageDimensions: `${finalProcessedImageData.width}x${finalProcessedImageData.height}`
+    })
     
     return metrics
   } catch (error) {

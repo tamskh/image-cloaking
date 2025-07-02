@@ -1,8 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { processImageWithFawkes, processImageWithAdvCloak } from '../utils/cloakingEngine'
+import { processImageWithFawkes, processImageWithAdvCloak, cleanup } from '../utils/cloakingEngine'
 import { calculateImageMetrics } from '../utils/imageUtils'
 import { processingEstimator } from '../utils/processingEstimator'
 import { createLogger } from '../utils/logger'
+import { globalThrottle } from '../utils/processingThrottle'
 
 const logger = createLogger('useImageCloaking')
 
@@ -13,6 +14,7 @@ export function useImageCloaking() {
   const [results, setResults] = useState(null)
   const [error, setError] = useState(null)
   const [currentStatus, setCurrentStatus] = useState('')
+  const [throttleStats, setThrottleStats] = useState(globalThrottle.getStats())
   
   const workerRef = useRef(null)
   const abortController = useRef(null)
@@ -28,28 +30,22 @@ export function useImageCloaking() {
       try {
         workerRef.current = new Worker(new URL('../utils/cloakingWorker.js', import.meta.url))
         
+        const initTaskId = Date.now()
+        
         workerRef.current.onmessage = (e) => {
-          const { type, progress: workerProgress, result, error: workerError, status } = e.data
+          const { type, taskId, progress: workerProgress, result, error: workerError, status } = e.data
           
-          switch (type) {
-            case 'WORKER_READY':
-              workerAvailable.current = true
-              logger.debug('Worker ready and available')
-              break
-            case 'PROGRESS':
-              setProgress(workerProgress)
-              break
-            case 'STATUS':
-              setCurrentStatus(status)
-              break
-            case 'COMPLETE':
-              handleProcessingComplete(result)
-              break
-            case 'WORKER_ERROR':
-              logger.warn('Worker failed, falling back to main thread:', workerError)
-              workerAvailable.current = false
-              // Don't treat as error, fall back to main thread
-              break
+          // Handle worker initialization
+          if (type === 'initialized' && taskId === initTaskId) {
+            workerAvailable.current = true
+            logger.info('Web Worker initialized successfully')
+            return
+          }
+          
+          // Handle global errors during processing
+          if (type === 'error' && !taskId) {
+            logger.warn('Worker error:', workerError)
+            workerAvailable.current = false
           }
         }
         
@@ -65,8 +61,11 @@ export function useImageCloaking() {
           workerRef.current = null
         }
         
-        // Test worker availability
-        workerRef.current.postMessage({ type: 'HEALTH_CHECK', taskId: Date.now() })
+        // Initialize worker
+        workerRef.current.postMessage({ 
+          type: 'init', 
+          taskId: initTaskId 
+        })
         
       } catch (error) {
         logger.warn('Worker initialization failed, using main thread only:', error)
@@ -85,12 +84,22 @@ export function useImageCloaking() {
           logger.warn('Error terminating worker:', error)
         }
       }
+      
+      // Cleanup TensorFlow.js resources
+      try {
+        cleanup()
+      } catch (cleanupError) {
+        logger.warn('Error during cleanup:', cleanupError)
+      }
     }
   }, [])
 
   const processImage = useCallback(async (imageFile, settings) => {
     // Clean slate
     resetProcessing()
+    
+    // Reset throttle stats for new processing session
+    globalThrottle.reset()
     
     if (!imageFile || !imageFile.type.startsWith('image/')) {
       throw new Error('Please select a valid image file')
@@ -104,6 +113,14 @@ export function useImageCloaking() {
     setCurrentStatus('Loading image...')
     abortController.current = new AbortController()
     processingStartTime.current = Date.now()
+    
+    // Start monitoring throttle stats during processing
+    const statsInterval = setInterval(() => {
+      setThrottleStats(globalThrottle.getStats())
+    }, 500) // Update every 500ms
+    
+    // Cleanup function for stats monitoring
+    const cleanupStats = () => clearInterval(statsInterval)
 
     try {
       // Get estimated time and pixel count for calibration
@@ -138,71 +155,145 @@ export function useImageCloaking() {
       let result
       // Use worker when available, otherwise main thread
       if (workerAvailable.current && workerRef.current && settings.useWorker !== false) {
-        setCurrentStatus('Processing with Web Worker...')
-        result = await processWithWorker(imageDataURL, settings)
+        try {
+          setCurrentStatus('Processing with Web Worker...')
+          result = await processWithWorker(imageDataURL, settings)
+          
+          // Format worker result to match expected structure
+          result = {
+            imageDataURL: result.processedDataURL,
+            processedDataURL: result.processedDataURL,
+            method: settings.method, // Worker doesn't include method, add it here
+            processingTime: 0, // Worker doesn't track timing
+            facesDetected: result.facesDetected || 0,
+            epsilon: result.epsilon,
+            iterations: result.iterations,
+            protectionLevel: result.protectionLevel
+          }
+          
+          logger.debug('Formatted worker result:', {
+            resultKeys: Object.keys(result),
+            hasProcessedDataURL: !!result.processedDataURL,
+            hasImageDataURL: !!result.imageDataURL,
+            method: result.method
+          })
+        } catch (workerError) {
+          if (workerError.message === 'FALLBACK_TO_MAIN_THREAD') {
+            logger.info('Falling back to main thread processing due to worker backend issues')
+            setCurrentStatus('Switching to main thread processing...')
+            result = await processOnMainThread(imageDataURL, settings)
+          } else {
+            throw workerError
+          }
+        }
       } else {
         // Main thread processing only when worker not available
         setCurrentStatus('Processing on main thread...')
         result = await processOnMainThread(imageDataURL, settings)
       }
 
-      // Processing completed successfully
+      // Both paths now go through handleProcessingComplete
+      await handleProcessingComplete(result)
+      
+      // Cleanup stats monitoring
+      cleanupStats()
+      setThrottleStats(globalThrottle.getStats()) // Final update
 
       return result
     } catch (error) {
+      // Cleanup stats monitoring on error
+      cleanupStats()
+      setThrottleStats(globalThrottle.getStats()) // Final update
+      
       handleProcessingError(error)
       throw error
     }
   }, [])
 
-  const processWithWorker = useCallback((imageDataURL, settings) => {
+  const processWithWorker = useCallback(async (imageDataURL, settings) => {
+    // Detect faces - required for Fawkes, optional for AdvCloak
+    setCurrentStatus('Detecting faces...')
+    const { detectFaces } = await import('../utils/cloakingEngine')
+    const faces = await detectFaces(imageDataURL)
+    
+    // Only require faces for Fawkes method
+    if (faces.length === 0 && (settings.method === 'fawkes' || settings.method === 'both')) {
+      throw new Error('No faces detected in the image. Fawkes protection requires faces to be present.')
+    }
+
     return new Promise((resolve, reject) => {
       if (!workerRef.current || !workerAvailable.current) {
         reject(new Error('Worker not available'))
         return
       }
 
-      const taskId = Date.now()
-      let completed = false
-      
-      const messageHandler = (e) => {
-        if (e.data.taskId !== taskId) return
-        
-        if (e.data.type === 'COMPLETE' && !completed) {
-          completed = true
-          workerRef.current.removeEventListener('message', messageHandler)
-          resolve(e.data.result)
-        } else if (e.data.type === 'WORKER_ERROR' && !completed) {
-          completed = true
-          workerRef.current.removeEventListener('message', messageHandler)
-          reject(new Error(e.data.error))
-        }
-      }
-      
-      workerRef.current.addEventListener('message', messageHandler)
-      
-      // Send task to worker
       try {
-        const taskType = settings.method === 'both' ? 'PROCESS_BOTH' : 
-                        settings.method === 'fawkes' ? 'PROCESS_FAWKES' : 'PROCESS_ADVCLOAK'
+        const taskId = Date.now()
+        let completed = false
+        
+        const messageHandler = (e) => {
+          if (e.data.taskId !== taskId) return
+          
+          if (e.data.type === 'result' && !completed) {
+            completed = true
+            workerRef.current.removeEventListener('message', messageHandler)
+            logger.debug('Received result from worker:', {
+              taskId,
+              resultKeys: Object.keys(e.data.result || {}),
+              hasProcessedDataURL: !!e.data.result?.processedDataURL,
+              processedDataURLLength: e.data.result?.processedDataURL?.length
+            })
+            resolve(e.data.result)
+          } else if (e.data.type === 'error' && !completed) {
+            completed = true
+            workerRef.current.removeEventListener('message', messageHandler)
+            
+            const errorMessage = e.data.error
+            logger.warn('Worker processing failed:', errorMessage)
+            
+            // If it's a backend error, fall back to main thread
+            if (errorMessage.includes('backend') || errorMessage.includes('Backend')) {
+              logger.info('Backend error detected, falling back to main thread')
+              workerAvailable.current = false
+              reject(new Error('FALLBACK_TO_MAIN_THREAD'))
+            } else {
+              reject(new Error(errorMessage))
+            }
+          } else if (e.data.type === 'progress') {
+            setProgress(e.data.progress)
+            if (e.data.status) {
+              setCurrentStatus(e.data.status)
+            }
+          }
+        }
+        
+        workerRef.current.addEventListener('message', messageHandler)
+        
+        // Map protection level to epsilon for Fawkes
+        const fawkesEpsilonMap = {
+          low: 0.02,
+          mid: 0.03, 
+          high: 0.05
+        }
+        
+        // Send task to worker with new protocol
+        const taskType = settings.method === 'both' ? 'both' : 
+                        settings.method === 'fawkes' ? 'fawkes' : 'advcloak'
         
         workerRef.current.postMessage({
           type: taskType,
           taskId,
           data: {
             imageDataURL,
-            protectionLevel: settings.fawkesLevel,
-            fawkesLevel: settings.fawkesLevel,
-            epsilon: settings.advCloakEpsilon,
-            iterations: settings.advCloakIterations,
+            faces,
+            fawkesEpsilon: fawkesEpsilonMap[settings.fawkesLevel] || 0.03,
             advCloakEpsilon: settings.advCloakEpsilon,
             advCloakIterations: settings.advCloakIterations
           }
         })
+        
       } catch (error) {
-        completed = true
-        workerRef.current.removeEventListener('message', messageHandler)
-        reject(new Error(`Failed to send task to worker: ${error.message}`))
+        reject(new Error(`Failed to process with worker: ${error.message}`))
       }
     })
   }, [])
@@ -236,7 +327,7 @@ export function useImageCloaking() {
         
         setCurrentStatus('Step 2/2: Applying AdvCloak protection...')
         result = await processImageWithAdvCloak(
-          fawkesResult, 
+          fawkesResult.processedDataURL, 
           settings.advCloakEpsilon, 
           settings.advCloakIterations,
           (p) => progressCallback(50 + p * 0.5),
@@ -245,9 +336,14 @@ export function useImageCloaking() {
       }
 
       return {
-        imageDataURL: result,
+        imageDataURL: result.processedDataURL || result,
+        processedDataURL: result.processedDataURL || result,
         method: settings.method,
-        processingTime: Date.now() - startTime
+        processingTime: Date.now() - startTime,
+        facesDetected: result.facesDetected || 0,
+        epsilon: result.epsilon,
+        iterations: result.iterations,
+        protectionLevel: result.protectionLevel
       }
     } catch (error) {
       throw new Error(`Main thread processing failed: ${error.message}`)
@@ -282,31 +378,84 @@ export function useImageCloaking() {
       if (originalImageDataURL.current && result.imageDataURL) {
         setCurrentStatus('Calculating quality metrics...')
         
-        // Calculate metrics with timeout to prevent hanging
-        const metricsPromise = calculateImageMetrics(originalImageDataURL.current, result.imageDataURL)
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Metrics calculation timeout')), 5000)
+        // Calculate actual quality metrics using imageUtils
+        const qualityMetrics = await calculateImageMetrics(
+          originalImageDataURL.current, 
+          result.imageDataURL
         )
         
-        metrics = await Promise.race([metricsPromise, timeoutPromise])
-        logger.debug('Metrics calculated successfully:', metrics)
+        // Merge quality metrics with metadata
+        metrics = {
+          ...qualityMetrics,
+          facesDetected: result.facesDetected || 0,
+          epsilon: result.epsilon,
+          iterations: result.iterations,
+          protectionLevel: result.protectionLevel,
+          method: result.method
+        }
+        
+        logger.debug('Metrics calculated successfully:', {
+          psnr: metrics.psnr,
+          ssim: metrics.ssim,
+          mse: metrics.mse,
+          facesDetected: metrics.facesDetected
+        })
       } else {
-        logger.warn('Cannot calculate metrics: missing original or processed image')
+        logger.warn('Cannot calculate metrics: missing original or processed image', {
+          hasOriginal: !!originalImageDataURL.current,
+          hasProcessed: !!result.imageDataURL
+        })
       }
     } catch (error) {
       logger.warn('Metrics calculation failed:', error.message)
-      // Continue with default metrics - don't let this block completion
+      // Continue with metadata only if quality calculation fails
+      metrics = {
+        psnr: null,
+        ssim: null,
+        mse: null,
+        perceptual_distance: null,
+        facesDetected: result.facesDetected || 0,
+        epsilon: result.epsilon,
+        iterations: result.iterations,
+        protectionLevel: result.protectionLevel,
+        method: result.method
+      }
     }
     
     // Set results immediately - don't wait for anything else
-    setResults({
-      [result.method]: {
-        imageData: result.imageDataURL,
-        metrics,
-        processingTime: result.processingTime || 0,
-        method: result.method
-      }
+    const processedDataURL = result.imageDataURL || result.processedDataURL
+    logger.debug('Setting results in state:', {
+      resultKeys: Object.keys(result),
+      hasImageDataURL: !!result.imageDataURL,
+      hasProcessedDataURL: !!result.processedDataURL,
+      finalProcessedDataURLLength: processedDataURL?.length,
+      resultMethod: result.method,
+      processedDataURLPrefix: processedDataURL?.substring(0, 50)
     })
+    
+    const finalResults = {
+      [result.method]: {
+        originalDataURL: originalImageDataURL.current,
+        processedDataURL: processedDataURL,
+        imageData: processedDataURL, // For compatibility with ResultsDisplay
+        method: result.method,
+        processingTime: result.processingTime || 0,
+        facesDetected: result.facesDetected || 0,
+        epsilon: result.epsilon,
+        iterations: result.iterations,
+        protectionLevel: result.protectionLevel,
+        metrics
+      }
+    }
+    
+    logger.debug('Final results object being set:', {
+      resultKeys: Object.keys(finalResults),
+      methodKeys: Object.keys(finalResults[result.method] || {}),
+      hasImageData: !!finalResults[result.method]?.imageData,
+      imageDataLength: finalResults[result.method]?.imageData?.length
+    })
+    
+    setResults(finalResults)
     
     setProgress(100)
     setCurrentStatus('Complete!')
@@ -416,6 +565,8 @@ export function useImageCloaking() {
     error,
     currentStatus,
     resetResults,
+    // Performance monitoring
+    throttleStats,
     // Expose worker status for debugging
     workerAvailable: workerAvailable.current
   }

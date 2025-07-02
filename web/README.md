@@ -1,261 +1,285 @@
-# Image Cloaking Web Interface - Phase 1
+# Image Cloaking Web Interface
 
-A modern, responsive web application for protecting images from AI recognition using client-side processing.
+A browser-based adversarial image protection system that applies imperceptible perturbations to protect privacy against AI recognition systems. Built with **TensorFlow.js**, **MediaPipe**, and **React**.
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- **Node.js 18.x** (recommended) or 16.x-20.x
-- npm or yarn
-- Modern web browser with Canvas API support
-
-### Installation & Development
-
 ```bash
-# Navigate to web directory
-cd web
-
-# Optional: Use the recommended Node version (if you have nvm)
-nvm use
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
+npm install && npm run dev
 ```
 
-The application will be available at `http://localhost:3000`
+The application runs entirely in the browser - no server required for processing.
 
-### Troubleshooting
+## 🏗️ Architecture Overview
 
-#### Node.js Version Issues
-If you encounter installation errors:
+### Core Processing Pipeline
 
-1. **Use Node.js 18.x** (recommended):
-   ```bash
-   nvm install 18.20.0
-   nvm use 18.20.0
-   ```
-
-2. **Clear npm cache** if switching Node versions:
-   ```bash
-   npm cache clean --force
-   rm -rf node_modules package-lock.json
-   npm install
-   ```
-
-#### Alternative Package Managers
-If npm fails, try yarn:
-```bash
-yarn install
-yarn dev
+```
+Image Upload → Face Detection → Adversarial Generation → Perturbation Application → Result
+     ↓              ↓                   ↓                      ↓              ↓
+   Validation   MediaPipe         TensorFlow.js         Tensor Clipping    Quality Metrics
 ```
 
-### Production Build
+### Protection Methods
 
-```bash
-npm run build
-npm run preview
+#### 1. **Fawkes Protection** 
+- **Algorithm**: Iterative Fast Gradient Sign Method (I-FGSM)
+- **Target**: Facial recognition systems
+- **Requirement**: Face detection required
+- **Parameters**: 
+  - Low: ε=0.02, 5 iterations
+  - Medium: ε=0.03, 10 iterations  
+  - High: ε=0.05, 15 iterations
+- **Best for**: Social media photos, profile pictures
+
+#### 2. **AdvCloak Protection**
+- **Algorithm**: Single-step Fast Gradient Sign Method (FGSM)
+- **Target**: General vision AI models (including LLMs)
+- **Requirement**: No face detection needed
+- **Parameters**: Configurable epsilon (0.02-0.08) and iterations (1-50)
+- **Best for**: Documents, screenshots, general images
+
+#### 3. **Combined Protection**
+- **Process**: Sequential application (Fawkes → AdvCloak)
+- **Protection**: Maximum coverage against multiple AI systems
+- **Trade-off**: Longer processing time, requires faces
+
+## 🔧 Technical Implementation
+
+### Face Detection System
+- **Engine**: MediaPipe BlazeFace (short-range model)
+- **Model**: Google's optimized face detection for selfies/close-ups
+- **Output**: Bounding boxes, confidence scores, 6 facial keypoints
+- **Threshold**: 0.5 detection confidence, 0.3 NMS suppression
+
+### Adversarial Attack Implementation
+- **Framework**: TensorFlow.js with WebGL/CPU backends
+- **Surrogate Model**: CNN architecture (Conv2D + GlobalAvgPool + Dense)
+- **Gradient Computation**: Automatic differentiation for loss gradients
+- **Perturbation Bounds**: Epsilon-ball constraint with pixel value clipping
+
+### Processing Architectures
+
+#### Web Worker Processing (Default)
+```
+Main Thread                    Web Worker
+     │                            │
+     ├─ Face Detection             │
+     ├─ Send Image + Faces ────────┤
+     │                             ├─ TensorFlow.js Init
+     │                             ├─ Adversarial Generation  
+     │                             ├─ Tensor Processing
+     ├─ Receive Result ────────────┤
+     ├─ Quality Metrics            │
+     └─ Display Result             │
 ```
 
-## 🎯 Phase 1 Features
+#### Main Thread Fallback
+- Automatic fallback on worker initialization failure
+- UI yield points to prevent blocking
+- Same processing quality with responsive interface
 
-### ✅ Implemented
-- **Client-side Processing**: 100% browser-based - images never leave your device
-- **Dual Protection Methods**:
-  - **Fawkes**: Facial recognition protection with adjustable intensity
-  - **AdvCloak**: Adversarial perturbations targeting LLM vision models
-- **Modern UI/UX**:
-  - Drag & drop image upload with validation
-  - Real-time processing progress
-  - Responsive design for desktop and mobile
-  - Minimalist, accessible interface
-- **Advanced Settings**:
-  - Protection method selection (Fawkes, AdvCloak, or both)
-  - Configurable perturbation strength and iterations
-  - Quality vs. protection trade-offs
-- **Results & Analysis**:
-  - Side-by-side comparison views
-  - Quality metrics (PSNR, SSIM, MSE, Perceptual Distance)
-  - Individual image downloads
-  - Batch download functionality
+### Memory Management
+- **Tensor Lifecycle**: Automatic disposal after operations
+- **Cleanup Strategy**: Explicit memory management with `tf.tidy()`
+- **Resource Limits**: Image resizing for WebGL texture constraints
+- **Garbage Collection**: Forced cleanup after processing completion
 
-### 🔧 Technical Stack
-- **Frontend**: React 18 + Vite
-- **Styling**: TailwindCSS with custom design system  
-- **Image Processing**: Browser Canvas API + custom JavaScript algorithms
-- **File Handling**: HTML5 File API with react-dropzone
-- **State Management**: React hooks (useState, useCallback)
-- **Icons**: Lucide React (lightweight icon library)
-- **Build**: Vite with optimized chunking and tree-shaking
-- **Dependencies**: Minimal, browser-only (no native modules)
+## 📊 Quality & Performance
 
-## 🏗️ Architecture
+### Image Quality Metrics
+- **PSNR**: Peak Signal-to-Noise Ratio (>30dB typical)
+- **SSIM**: Structural Similarity Index (>0.95 typical)  
+- **MSE**: Mean Squared Error (pixel-level differences)
+- **Perceptual Distance**: RGB distance approximation
 
-### Component Structure
+### Performance Optimization
+- **Device Detection**: Hardware capability assessment
+- **Processing Estimation**: Smart time prediction based on image complexity
+- **Adaptive Compression**: Quality-based JPEG output (70-95% quality)
+- **Memory Limits**: Conservative texture size limits (4096px max dimension)
+
+### Processing Time Estimates
+| Method | Small Image (1MP) | Medium Image (4MP) | Large Image (8MP) |
+|--------|-------------------|-------------------|-------------------|
+| Fawkes | 15-30s | 30-60s | 60-120s |
+| AdvCloak | 10-25s | 25-50s | 50-100s |
+| Combined | 30-60s | 60-120s | 120-240s |
+
+*Times vary based on device performance and selected parameters*
+
+## 🛠️ Development Guide
+
+### Project Structure
 ```
 src/
-├── components/
-│   ├── Header.jsx              # Navigation and branding
-│   ├── ImageUploader.jsx       # Drag-drop upload interface
-│   ├── SettingsPanel.jsx       # Advanced configuration
-│   ├── ProcessingPanel.jsx     # Progress and controls
-│   └── ResultsDisplay.jsx      # Results and comparisons
+├── components/          # React UI components
+│   ├── ImageUploader.jsx      # Drag & drop upload
+│   ├── ProcessingPanel.jsx    # Settings & controls
+│   ├── ResultsDisplay.jsx     # Output visualization
+│   └── SettingsPanel.jsx      # Method configuration
 ├── hooks/
-│   └── useImageCloaking.js     # Core processing state management
+│   └── useImageCloaking.js    # Main processing hook
 ├── utils/
-│   ├── imageUtils.js           # Image metrics and utilities
-│   └── cloakingEngine.js       # Client-side algorithms
-├── App.jsx                     # Main application component
-└── main.jsx                    # React entry point
+│   ├── cloakingEngine.js      # TensorFlow.js processing
+│   ├── cloakingWorker.js      # Web Worker implementation
+│   ├── imageUtils.js          # Image manipulation utilities
+│   ├── processingEstimator.js # Performance prediction
+│   └── logger.js              # Debug logging system
+└── main.jsx                   # Application entry point
 ```
 
-### Processing Pipeline
+### Key Components
 
-1. **Image Upload**: File validation and preview generation
-2. **Settings Configuration**: Method selection and parameter tuning
-3. **Client-side Processing**: 
-   - Fawkes: Face detection + targeted perturbations
-   - AdvCloak: Iterative adversarial optimization
-4. **Quality Analysis**: Real-time metrics calculation
-5. **Results Display**: Comparison views and download options
+#### `useImageCloaking` Hook
+Central state management for the entire processing pipeline:
+- **State**: Processing status, progress, results, error handling
+- **Methods**: `processImage()`, `cancelProcessing()`, `resetResults()`
+- **Features**: Worker/main thread coordination, automatic fallback, progress tracking
 
-## 🛡️ Security & Privacy
+#### `cloakingEngine.js`
+Core TensorFlow.js implementation:
+- **Initialization**: Backend selection (WebGL → CPU fallback)
+- **Face Detection**: MediaPipe integration
+- **Attack Classes**: `FGSMAttack`, `IterativeFGSMAttack` with surrogate models
+- **Image Conversion**: DataURL ↔ Tensor with proper normalization
 
-### Privacy-First Design
-- **No Server Processing**: All image processing happens in your browser
-- **No Data Collection**: Images and results are never transmitted or stored
-- **Local Storage Only**: Temporary processing data stays on your device
-- **GDPR Compliant**: No tracking or personal data handling
+#### `cloakingWorker.js`
+Background processing implementation:
+- **Isolation**: Complete TensorFlow.js instance in worker context
+- **Communication**: Message-based task distribution
+- **Memory Management**: Aggressive cleanup and monitoring
+- **Error Handling**: Graceful fallback to main thread
+
+### Configuration Options
+
+#### Fawkes Settings
+```javascript
+{
+  method: 'fawkes',
+  fawkesLevel: 'mid',     // 'low' | 'mid' | 'high'
+}
+```
+
+#### AdvCloak Settings  
+```javascript
+{
+  method: 'advcloak',
+  advCloakEpsilon: 0.05,      // Perturbation strength (0.02-0.08)
+  advCloakIterations: 15      // Processing iterations (1-50)
+}
+```
+
+#### Combined Settings
+```javascript
+{
+  method: 'both',
+  fawkesLevel: 'mid',
+  advCloakEpsilon: 0.05,
+  advCloakIterations: 15
+}
+```
+
+### Error Handling Strategy
+
+#### Graceful Degradation
+1. **WebGL Backend Failure** → CPU Backend
+2. **Web Worker Failure** → Main Thread Processing
+3. **Face Detection Failure** → Method restriction (AdvCloak only)
+4. **Memory Issues** → Image resizing + retry
+
+#### User-Friendly Errors
+- Clear error messages for common issues
+- Automatic retry mechanisms where appropriate
+- Fallback processing modes
+- Progress feedback during long operations
+
+## 🔬 Research Foundation
+
+### Academic References
+- **FGSM**: [Explaining and Harnessing Adversarial Examples](https://arxiv.org/abs/1412.6572) (Goodfellow et al.)
+- **Fawkes**: [Protecting Privacy against Unauthorized Deep Learning Models](https://www.usenix.org/conference/usenixsecurity20/presentation/shan) (Shan et al.)
+- **AdvCloak**: Advanced perturbation techniques for vision transformer protection
+
+### Implementation Notes
+- **Surrogate Models**: CNN architectures to approximate target model gradients
+- **Transferability**: Adversarial examples transfer across different model architectures
+- **Epsilon Constraints**: Bounded perturbations to maintain image quality
+- **Iterative Refinement**: Multi-step attacks for stronger perturbations
+
+## 🚀 Production Deployment
+
+### Build Configuration
+```bash
+npm run build          # Production build
+npm run preview        # Preview build locally
+```
+
+### Performance Considerations
+- **CDN Delivery**: TensorFlow.js and MediaPipe models loaded from CDN
+- **Caching Strategy**: Browser caching for models and static assets
+- **Memory Monitoring**: Built-in memory usage tracking and warnings
+- **Device Adaptation**: Automatic quality/speed adjustments based on hardware
 
 ### Browser Compatibility
-- **Chrome 88+** (recommended)
-- **Firefox 85+**
-- **Safari 14+**
-- **Edge 88+**
+- **Modern Browsers**: Chrome 80+, Firefox 78+, Safari 14+, Edge 80+
+- **WebGL Support**: Required for optimal performance
+- **Web Workers**: Required for non-blocking processing
+- **File API**: Required for image upload and processing
 
-**Required Browser Features:**
-- Canvas API
-- File API
-- ES2020 support
-- WebGL (for optimal performance)
+## 🐛 Debugging
 
-## ⚙️ Configuration Options
+### Debug Mode
+Enable detailed logging by setting localStorage:
+```javascript
+localStorage.setItem('debug', 'true')
+```
 
-### Fawkes Settings
-- **Protection Level**: `low`, `mid`, `high`
-- **Target**: Facial recognition systems
-- **Approach**: Targeted perturbations in face regions
+### Common Issues
+1. **"WebGL backend failed"** → Browser WebGL disabled/unsupported
+2. **"Worker not available"** → HTTPS required or worker blocked
+3. **"No faces detected"** → Image lacks detectable faces (use AdvCloak)
+4. **"Out of memory"** → Image too large (resize to <4MP)
 
-### AdvCloak Settings
-- **Epsilon**: 0.01-0.08 (perturbation strength)
-- **Iterations**: 10-50 (optimization steps)
-- **Target**: LLM vision models (GPT-4V, Claude Vision, etc.)
-- **Approach**: Iterative adversarial optimization
+### Development Tools
+- **Browser DevTools**: Monitor tensor memory usage
+- **Performance Tab**: Profile TensorFlow.js operations
+- **Network Tab**: Track model loading progress
+- **Console Logs**: Detailed processing pipeline information
 
-### Output Options
-- **Quality Metrics**: Toggle comparison analysis
-- **Download Formats**: PNG with preserved quality
-- **Batch Processing**: Multiple image downloads
+## 📈 Future Enhancements
 
-## 📊 Quality Metrics
+### Planned Features
+- **Additional Attack Methods**: PGD, C&W attacks for stronger protection
+- **Batch Processing**: Multiple image processing pipeline
+- **Custom Models**: User-uploadable surrogate models
+- **API Integration**: Optional cloud processing for heavy computations
 
-### PSNR (Peak Signal-to-Noise Ratio)
-- **Range**: 20-50+ dB
-- **Interpretation**: Higher = better image quality
-- **Excellent**: >30 dB
+### Research Integrations
+- **LowKey Attack**: Implementation based on recent research
+- **Robust Training**: Adversarial training aware processing
+- **Adaptive Attacks**: Dynamic perturbation adjustment
+- **Quality Optimization**: Perceptual loss minimization
 
-### SSIM (Structural Similarity Index)
-- **Range**: 0-1
-- **Interpretation**: Higher = more similar to original
-- **Excellent**: >0.9
+## 📝 License
 
-### MSE (Mean Squared Error)
-- **Range**: 0+
-- **Interpretation**: Lower = less visual difference
-- **Good**: <100
-
-### Perceptual Distance
-- **Range**: 0+
-- **Interpretation**: Lower = less perceivable change
-- **Custom metric**: RGB-based approximation
-
-## 🔄 Integration with Phase 0
-
-The web interface leverages algorithms adapted from the CLI implementation:
-
-### From Python CLI → Browser JavaScript
-- **Fawkes wrapper** → Client-side face detection + perturbations
-- **AdvCloak wrapper** → Browser-based adversarial optimization
-- **Comparator utility** → Real-time metrics calculation
-- **Batch processing** → Multi-image upload and download
-
-### Performance Optimizations
-- **Progressive Enhancement**: Graceful degradation for older browsers
-- **Async Processing**: Non-blocking image operations
-- **Memory Management**: Efficient canvas operations
-- **Chunked Operations**: Prevent UI freezing during processing
-
-## 🚧 Limitations & Future Improvements
-
-### Current Limitations
-- **Algorithm Simplification**: Browser implementations are simplified but effective versions
-- **Processing Speed**: Slower than native Python implementations (but still real-time)
-- **File Size**: Recommended maximum 10MB per image for optimal performance
-- **Mobile Performance**: Limited by device computational power (works on modern devices)
-
-### Advantages of Browser-Based Approach
-- **Zero Installation**: No Python environment or dependencies required
-- **Universal Access**: Works on any device with a modern browser
-- **Complete Privacy**: Images never leave your device
-- **Cross-Platform**: Works on Windows, macOS, Linux, iOS, Android
-- **No Compilation**: Pure JavaScript - no native modules to build
-
-### Phase 2+ Roadmap
-- **WebAssembly Integration**: Near-native performance
-- **Worker Threads**: Background processing
-- **Advanced Models**: More sophisticated detection algorithms
-- **Batch Processing**: Multi-image simultaneous processing
-- **Cloud Options**: Optional server-side processing
-- **Mobile App**: Native iOS/Android versions
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## 🤝 Contributing
 
-### Development Setup
+1. **Code Style**: Follow existing patterns and ESLint configuration
+2. **Testing**: Ensure cross-browser compatibility
+3. **Documentation**: Update README for API changes
+4. **Performance**: Profile changes for memory/speed impact
+
+### Development Commands
 ```bash
-# Install dependencies
-npm install
-
-# Run development server with hot reload
-npm run dev
-
-# Run linting
-npm run lint
-
-# Build for production
-npm run build
+npm run dev          # Development server
+npm run build        # Production build  
+npm run preview      # Preview production build
+npm run lint         # ESLint checking
 ```
-
-### Code Style
-- ESLint configuration for React
-- Prettier for code formatting
-- TailwindCSS for consistent styling
-- Component-based architecture
-
-### Testing
-```bash
-# Run tests (when available)
-npm test
-
-# Run build verification
-npm run build && npm run preview
-```
-
-## 📄 License
-
-This project is part of the larger Image Cloaking project. See the main repository for license information.
 
 ---
 
-**Note**: This is Phase 1 of the web interface. For the full CLI implementation, see the main project directory. 
+**Built with modern web technologies for privacy protection through adversarial machine learning** 🛡️ 
