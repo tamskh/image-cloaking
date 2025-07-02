@@ -1,25 +1,31 @@
-import React, { useState } from 'react'
-import { Shield, Github, Menu, X, Lock, Globe } from 'lucide-react'
+import React, { useState } from "react";
+import { Shield, Github, Menu, X, Lock, Globe } from "lucide-react";
 
 function Header({ onGetStarted }) {
-  const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   const navItems = [
-    { label: 'Why Protect Photos?', onClick: () => scrollToSection('why-section') },
-    { label: 'How It Works', onClick: () => scrollToSection('how-it-works-section') },
-    { label: 'Questions', onClick: () => scrollToSection('faq-section') }
-  ]
+    {
+      label: "Why Protect Photos?",
+      onClick: () => scrollToSection("why-section"),
+    },
+    {
+      label: "How It Works",
+      onClick: () => scrollToSection("how-it-works-section"),
+    },
+    { label: "Questions", onClick: () => scrollToSection("faq-section") },
+  ];
 
   const scrollToSection = (sectionId) => {
-    const element = document.querySelector(`#${sectionId}`)
+    const element = document.querySelector(`#${sectionId}`);
     if (element) {
-      element.scrollIntoView({ 
-        behavior: 'smooth',
-        block: 'start' 
-      })
+      element.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     }
-    setIsMenuOpen(false)
-  }
+    setIsMenuOpen(false);
+  };
 
   return (
     <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-sm border-b border-gray-200">
@@ -32,7 +38,9 @@ function Header({ onGetStarted }) {
             </div>
             <div>
               <h1 className="font-bold text-gray-900">ImageShield</h1>
-              <p className="text-xs text-gray-500 hidden sm:block">Experimental Image Privacy Research</p>
+              <p className="text-xs text-gray-500 hidden sm:block">
+                Experimental Image Privacy Research
+              </p>
             </div>
           </div>
 
@@ -47,8 +55,8 @@ function Header({ onGetStarted }) {
                 {item.label}
               </button>
             ))}
-            <a 
-              href="https://github.com/yourusername/image-cloaking" 
+            <a
+              href="https://github.com/yourusername/image-cloaking"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors duration-200 text-sm font-medium"
@@ -64,7 +72,7 @@ function Header({ onGetStarted }) {
               <Lock className="w-3 h-3" />
               <span className="text-xs font-medium">100% Private</span>
             </div>
-            <button 
+            <button
               onClick={onGetStarted}
               className="bg-primary-600 hover:bg-primary-700 text-white font-medium px-4 py-2 rounded-lg transition-colors duration-200 text-sm"
             >
@@ -77,7 +85,11 @@ function Header({ onGetStarted }) {
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             className="md:hidden p-2 text-gray-600 hover:text-gray-900 transition-colors duration-200"
           >
-            {isMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            {isMenuOpen ? (
+              <X className="w-5 h-5" />
+            ) : (
+              <Menu className="w-5 h-5" />
+            )}
           </button>
         </div>
 
@@ -94,8 +106,8 @@ function Header({ onGetStarted }) {
                   {item.label}
                 </button>
               ))}
-              <a 
-                href="https://github.com/yourusername/image-cloaking" 
+              <a
+                href="https://github.com/yourusername/image-cloaking"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition-colors duration-200 py-2 font-medium"
@@ -106,9 +118,11 @@ function Header({ onGetStarted }) {
               <div className="pt-4 border-t border-gray-200">
                 <div className="flex items-center justify-center gap-2 text-green-600 bg-green-50 px-3 py-2 rounded-full mb-3">
                   <Lock className="w-3 h-3" />
-                  <span className="text-xs font-medium">100% Private Processing</span>
+                  <span className="text-xs font-medium">
+                    100% Private Processing
+                  </span>
                 </div>
-                <button 
+                <button
                   onClick={onGetStarted}
                   className="w-full bg-primary-600 hover:bg-primary-700 text-white font-medium px-4 py-3 rounded-lg transition-colors duration-200"
                 >
@@ -120,7 +134,7 @@ function Header({ onGetStarted }) {
         )}
       </div>
     </header>
-  )
+  );
 }
 
-export default Header 
+export default Header;

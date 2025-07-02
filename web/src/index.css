@@ -118,7 +118,8 @@
 
 /* Optimized animations */
 @keyframes bounce-subtle {
-  0%, 100% {
+  0%,
+  100% {
     transform: translateY(0);
   }
   50% {
@@ -178,7 +179,7 @@
   .card {
     @apply p-4;
   }
-  
+
   .btn-primary,
   .btn-secondary,
   .btn-danger {
@@ -200,7 +201,7 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
-  
+
   html {
     scroll-behavior: auto;
   }
@@ -217,7 +218,7 @@
   html {
     scroll-behavior: smooth;
   }
-  
+
   body {
     @apply text-gray-900;
   }
@@ -227,7 +228,7 @@
   .dropzone {
     @apply border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-primary-400 transition-colors duration-200 cursor-pointer;
   }
-  
+
   .dropzone.active {
     @apply border-primary-500 bg-primary-50;
   }
@@ -237,7 +238,7 @@
     display: inline-flex;
     gap: 2px;
   }
-  
+
   .loading-dots div {
     width: 4px;
     height: 4px;
@@ -245,21 +246,29 @@
     background-color: currentColor;
     animation: loading-dots 1.4s ease-in-out infinite both;
   }
-  
-  .loading-dots div:nth-child(1) { animation-delay: -0.32s; }
-  .loading-dots div:nth-child(2) { animation-delay: -0.16s; }
-  .loading-dots div:nth-child(3) { animation-delay: 0s; }
-  .loading-dots div:nth-child(4) { animation-delay: 0.16s; }
+
+  .loading-dots div:nth-child(1) {
+    animation-delay: -0.32s;
+  }
+  .loading-dots div:nth-child(2) {
+    animation-delay: -0.16s;
+  }
+  .loading-dots div:nth-child(3) {
+    animation-delay: 0s;
+  }
+  .loading-dots div:nth-child(4) {
+    animation-delay: 0.16s;
+  }
 
   /* Mobile menu styles */
   .mobile-menu {
     @apply fixed inset-0 z-50 bg-white transform transition-transform duration-300 ease-in-out;
   }
-  
+
   .mobile-menu.closed {
     @apply translate-x-full;
   }
-  
+
   .mobile-menu.open {
     @apply translate-x-0;
   }
@@ -268,14 +277,16 @@
   .slider::-webkit-slider-thumb {
     @apply appearance-none w-5 h-5 bg-primary-500 rounded-full cursor-pointer border-2 border-white shadow-md;
   }
-  
+
   .slider::-moz-range-thumb {
     @apply w-5 h-5 bg-primary-500 rounded-full cursor-pointer border-2 border-white shadow-md;
   }
 }
 
 @keyframes loading-dots {
-  0%, 80%, 100% {
+  0%,
+  80%,
+  100% {
     transform: scale(0.8);
     opacity: 0.5;
   }
@@ -301,4 +312,4 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
-} 
+}

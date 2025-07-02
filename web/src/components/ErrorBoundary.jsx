@@ -1,26 +1,26 @@
-import { Component } from 'react'
-import { AlertTriangle, RefreshCw, Home } from 'lucide-react'
-import { createLogger } from '../utils/logger'
+import { Component } from "react";
+import { AlertTriangle, RefreshCw, Home } from "lucide-react";
+import { createLogger } from "../utils/logger";
 
-const logger = createLogger('ErrorBoundary')
+const logger = createLogger("ErrorBoundary");
 
 class ErrorBoundary extends Component {
   constructor(props) {
-    super(props)
-    this.state = { hasError: false, error: null, errorInfo: null }
+    super(props);
+    this.state = { hasError: false, error: null, errorInfo: null };
   }
 
   static getDerivedStateFromError(_error) {
     // Update state so the next render will show the fallback UI
-    return { hasError: true }
+    return { hasError: true };
   }
 
   componentDidCatch(error, errorInfo) {
-    logger.error('Error boundary caught an error:', error, errorInfo)
+    logger.error("Error boundary caught an error:", error, errorInfo);
     this.setState({
       error: error,
-      errorInfo: errorInfo
-    })
+      errorInfo: errorInfo,
+    });
   }
 
   render() {
@@ -33,18 +33,21 @@ class ErrorBoundary extends Component {
                 <AlertTriangle className="w-6 h-6 text-red-600" />
               </div>
             </div>
-            
+
             <h1 className="text-xl font-semibold text-gray-900 mb-2">
               Something went wrong
             </h1>
-            
+
             <p className="text-gray-600 mb-6">
-              We&apos;re sorry, but something unexpected happened. Please try refreshing the page or contact support if the problem persists.
+              We&apos;re sorry, but something unexpected happened. Please try
+              refreshing the page or contact support if the problem persists.
             </p>
 
             {import.meta.env.DEV && this.state.error && (
               <div className="mb-6 p-3 bg-gray-50 rounded-lg text-left">
-                <p className="text-sm text-gray-700 font-medium mb-2">Error Details:</p>
+                <p className="text-sm text-gray-700 font-medium mb-2">
+                  Error Details:
+                </p>
                 <code className="text-xs text-red-600 break-all">
                   {this.state.error.toString()}
                 </code>
@@ -59,9 +62,9 @@ class ErrorBoundary extends Component {
                 <RefreshCw className="w-4 h-4" />
                 Refresh Page
               </button>
-              
+
               <button
-                onClick={() => window.location.href = '/'}
+                onClick={() => (window.location.href = "/")}
                 className="btn-secondary flex items-center justify-center gap-2"
               >
                 <Home className="w-4 h-4" />
@@ -70,11 +73,11 @@ class ErrorBoundary extends Component {
             </div>
           </div>
         </div>
-      )
+      );
     }
 
-    return this.props.children
+    return this.props.children;
   }
 }
 
-export default ErrorBoundary 
+export default ErrorBoundary;
