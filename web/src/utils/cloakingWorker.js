@@ -3,9 +3,13 @@
  * Embeds optimized algorithms to avoid import issues
  */
 
-import { createLogger } from './logger'
-
-const logger = createLogger('CloakingWorker')
+// Simple inline logger for worker (no external imports)
+const logger = {
+  debug: (message, ...args) => console.debug(`[CloakingWorker] ${message}`, ...args),
+  info: (message, ...args) => console.info(`[CloakingWorker] ${message}`, ...args),
+  warn: (message, ...args) => console.warn(`[CloakingWorker] ${message}`, ...args),
+  error: (message, ...args) => console.error(`[CloakingWorker] ${message}`, ...args)
+}
 
 // Self-contained cloaking implementation for worker
 class WorkerFaceDetector {
@@ -206,21 +210,43 @@ function getImageDataFromDataURL(dataURL) {
 }
 
 function imageDataToDataURL(imageData) {
-  if (typeof OffscreenCanvas !== 'undefined') {
-    const canvas = new OffscreenCanvas(imageData.width, imageData.height)
-    const ctx = canvas.getContext('2d')
-    ctx.putImageData(imageData, 0, 0)
-    return canvas.convertToBlob({ type: 'image/png' })
-      .then(blob => {
-        return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const canvas = new OffscreenCanvas(imageData.width, imageData.height)
+        const ctx = canvas.getContext('2d')
+        ctx.putImageData(imageData, 0, 0)
+        
+        // Convert to blob with timeout
+        const blobPromise = canvas.convertToBlob({ type: 'image/png' })
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Canvas to blob conversion timeout')), 10000)
+        )
+        
+        const blob = await Promise.race([blobPromise, timeoutPromise])
+        
+        // Convert blob to data URL with timeout
+        const dataURLPromise = new Promise((resolve, reject) => {
           const reader = new FileReader()
           reader.onload = () => resolve(reader.result)
-          reader.onerror = reject
+          reader.onerror = () => reject(new Error('FileReader error'))
           reader.readAsDataURL(blob)
         })
-      })
-  }
-  throw new Error('OffscreenCanvas not supported')
+        
+        const timeoutPromise2 = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Blob to dataURL conversion timeout')), 5000)
+        )
+        
+        const dataURL = await Promise.race([dataURLPromise, timeoutPromise2])
+        resolve(dataURL)
+      } else {
+        reject(new Error('OffscreenCanvas not supported'))
+      }
+    } catch (error) {
+      logger.error('imageDataToDataURL error:', error)
+      reject(error)
+    }
+  })
 }
 
 // Core processing functions
@@ -251,23 +277,38 @@ async function processImageWithFawkes(imageDataURL, protectionLevel, progressCal
 }
 
 async function processImageWithAdvCloak(imageDataURL, epsilon, iterations, progressCallback) {
-  try {
-    progressCallback?.(5)
-    const imageData = await getImageDataFromDataURL(imageDataURL)
-    progressCallback?.(15)
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Add timeout for AdvCloak processing (10 minutes max)
+      const processingTimeout = setTimeout(() => {
+        reject(new Error('AdvCloak processing timeout in worker'))
+      }, 600000) // 10 minutes
+      
+      const cleanup = () => clearTimeout(processingTimeout)
+      
+      try {
+        progressCallback?.(5)
+        const imageData = await getImageDataFromDataURL(imageDataURL)
+        progressCallback?.(15)
 
-    const model = new WorkerVisionModel()
-    const result = await applyFastGlobalAttack(imageData, model, epsilon, iterations, progressCallback)
-    progressCallback?.(95)
+        const model = new WorkerVisionModel()
+        const result = await applyFastGlobalAttack(imageData, model, epsilon, iterations, progressCallback)
+        progressCallback?.(95)
 
-    const resultDataURL = await imageDataToDataURL(result)
-    progressCallback?.(100)
+        const resultDataURL = await imageDataToDataURL(result)
+        progressCallback?.(100)
 
-    return resultDataURL
-  } catch (error) {
-    logger.error(`AdvCloak processing failed: ${error.message}`)
-    throw new Error(`AdvCloak processing failed: ${error.message}`)
-  }
+        cleanup()
+        resolve(resultDataURL)
+      } catch (error) {
+        cleanup()
+        throw error
+      }
+    } catch (error) {
+      logger.error(`AdvCloak processing failed: ${error.message}`)
+      reject(new Error(`AdvCloak processing failed: ${error.message}`))
+    }
+  })
 }
 
 async function applyFastAdversarialAttack(imageData, model, faces, epsilon, iterations, progressCallback) {

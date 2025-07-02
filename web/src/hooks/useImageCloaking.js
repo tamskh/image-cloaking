@@ -20,6 +20,7 @@ export function useImageCloaking() {
   const processingStartTime = useRef(null)
   const estimatedProcessingTime = useRef(null)
   const currentPixelCount = useRef(null)
+  const originalImageDataURL = useRef(null)
 
   // Initialize worker with robust error handling
   useEffect(() => {
@@ -127,26 +128,20 @@ export function useImageCloaking() {
         logger.warn('Failed to get calibration data:', calibrationError)
       }
       
-      // Convert to data URL
+      // Convert to data URL and store reference
       const imageDataURL = await fileToDataURL(imageFile)
+      originalImageDataURL.current = imageDataURL
       setProgress(5)
 
       // No automatic timeout - user can cancel manually
 
       let result
-      // Try worker first if available, with robust fallback
+      // Use worker when available, otherwise main thread
       if (workerAvailable.current && workerRef.current && settings.useWorker !== false) {
-        try {
-          setCurrentStatus('Processing with Web Worker...')
-          result = await processWithWorker(imageDataURL, settings)
-        } catch (workerError) {
-          logger.warn('Worker processing failed, falling back to main thread:', workerError)
-          workerAvailable.current = false
-          setCurrentStatus('Falling back to main thread processing...')
-          result = await processOnMainThread(imageDataURL, settings)
-        }
+        setCurrentStatus('Processing with Web Worker...')
+        result = await processWithWorker(imageDataURL, settings)
       } else {
-        // Main thread processing
+        // Main thread processing only when worker not available
         setCurrentStatus('Processing on main thread...')
         result = await processOnMainThread(imageDataURL, settings)
       }
@@ -169,8 +164,6 @@ export function useImageCloaking() {
 
       const taskId = Date.now()
       let completed = false
-      
-      // No worker timeout - user can cancel manually
       
       const messageHandler = (e) => {
         if (e.data.taskId !== taskId) return
@@ -281,30 +274,39 @@ export function useImageCloaking() {
       }
     }
     
-    // Calculate metrics with timeout and error handling
+    // Calculate metrics with robust error handling
+    let metrics = { psnr: null, ssim: null, mse: null, perceptual_distance: null }
+    
     try {
-      const metrics = { psnr: null, ssim: null, mse: null } // Default fallback
-      
-      setResults({
-        [result.method]: {
-          imageData: result.imageDataURL,
-          metrics,
-          processingTime: result.processingTime,
-          method: result.method
-        }
-      })
+      // Only calculate metrics if we have both original and processed images
+      if (originalImageDataURL.current && result.imageDataURL) {
+        setCurrentStatus('Calculating quality metrics...')
+        
+        // Calculate metrics with timeout to prevent hanging
+        const metricsPromise = calculateImageMetrics(originalImageDataURL.current, result.imageDataURL)
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Metrics calculation timeout')), 5000)
+        )
+        
+        metrics = await Promise.race([metricsPromise, timeoutPromise])
+        logger.debug('Metrics calculated successfully:', metrics)
+      } else {
+        logger.warn('Cannot calculate metrics: missing original or processed image')
+      }
     } catch (error) {
-      logger.warn('Results processing failed:', error)
-      // Still show results even if metrics fail
-      setResults({
-        [result.method]: {
-          imageData: result.imageDataURL,
-          metrics: { psnr: null, ssim: null, mse: null },
-          processingTime: result.processingTime || 0,
-          method: result.method
-        }
-      })
+      logger.warn('Metrics calculation failed:', error.message)
+      // Continue with default metrics - don't let this block completion
     }
+    
+    // Set results immediately - don't wait for anything else
+    setResults({
+      [result.method]: {
+        imageData: result.imageDataURL,
+        metrics,
+        processingTime: result.processingTime || 0,
+        method: result.method
+      }
+    })
     
     setProgress(100)
     setCurrentStatus('Complete!')
@@ -336,6 +338,7 @@ export function useImageCloaking() {
     processingStartTime.current = null
     estimatedProcessingTime.current = null
     currentPixelCount.current = null
+    originalImageDataURL.current = null
   }, [])
 
   const resetResults = useCallback(() => {

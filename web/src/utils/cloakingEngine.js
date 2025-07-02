@@ -274,34 +274,49 @@ export async function processImageWithFawkes(imageDataURL, protectionLevel = 'mi
 }
 
 export async function processImageWithAdvCloak(imageDataURL, epsilon = 0.04, iterations = 12, progressCallback, abortSignal) {
-  try {
-    if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-    if (progressCallback) progressCallback(0)
-    
-    const imageData = await getImageDataFromDataURL(imageDataURL)
-    if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
-    if (progressCallback) progressCallback(10)
-    
-    const model = new FastVisionModel('ensemble')
-    
-    const cloakedImageData = await applyFastGlobalAttack(
-      imageData, model, Math.min(epsilon, 0.06), Math.min(iterations, 15),
-      (progress) => {
-        if (progressCallback) progressCallback(10 + progress * 0.85)
-      },
-      abortSignal
-    )
-    
-    if (progressCallback) progressCallback(98)
-    
-    const resultDataURL = imageDataToDataURL(cloakedImageData)
-    if (progressCallback) progressCallback(100)
-    
-    return resultDataURL
-  } catch (error) {
-    logger.error('Fast AdvCloak processing error:', error)
-    throw error
-  }
+  return new Promise(async (resolve, reject) => {
+    try {
+      if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
+      if (progressCallback) progressCallback(0)
+      
+      // Add timeout for AdvCloak processing (10 minutes max)
+      const processingTimeout = setTimeout(() => {
+        reject(new Error('AdvCloak processing timeout - please try with smaller image or lower iterations'))
+      }, 600000) // 10 minutes
+      
+      const cleanup = () => clearTimeout(processingTimeout)
+      
+      try {
+        const imageData = await getImageDataFromDataURL(imageDataURL)
+        if (abortSignal?.aborted) throw new Error('Processing cancelled by user')
+        if (progressCallback) progressCallback(10)
+        
+        const model = new FastVisionModel('ensemble')
+        
+        const cloakedImageData = await applyFastGlobalAttack(
+          imageData, model, Math.min(epsilon, 0.06), Math.min(iterations, 15),
+          (progress) => {
+            if (progressCallback) progressCallback(10 + progress * 0.85)
+          },
+          abortSignal
+        )
+        
+        if (progressCallback) progressCallback(98)
+        
+        const resultDataURL = imageDataToDataURL(cloakedImageData)
+        if (progressCallback) progressCallback(100)
+        
+        cleanup()
+        resolve(resultDataURL)
+      } catch (error) {
+        cleanup()
+        throw error
+      }
+    } catch (error) {
+      logger.error('Fast AdvCloak processing error:', error)
+      reject(error)
+    }
+  })
 }
 
 async function applyFastAdversarialAttack(imageData, model, faces, epsilon, iterations, progressCallback, abortSignal) {
